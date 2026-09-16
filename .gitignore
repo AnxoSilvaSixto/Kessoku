@@ -1,0 +1,14 @@
+# Build output
+build/
+out/
+
+# vcpkg build artifacts -- regenerated from vcpkg.json via `vcpkg install`
+vcpkg_installed/
+
+# IDE / editor caches
+.vs/
+*.user
+CMakeUserPresets.json
+
+# OS cruft
+Thumbs.db

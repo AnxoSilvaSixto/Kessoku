@@ -1,0 +1,9 @@
+{
+  "name": "kessoku",
+  "version": "0.1.0",
+  "dependencies": [
+    "libflac",
+    "taglib",
+    "wtl"
+  ]
+}
