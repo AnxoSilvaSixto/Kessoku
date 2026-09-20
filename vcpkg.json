@@ -1,6 +1,7 @@
 {
   "name": "kessoku",
   "version": "0.1.0",
+  "builtin-baseline": "319504a5326aa870edde46438c5455fa76305a56",
   "dependencies": [
     "libflac",
     "taglib",
