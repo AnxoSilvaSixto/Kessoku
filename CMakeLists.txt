@@ -6,6 +6,9 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Export compile_commands.json for clangd (advisory only; MSVC is truth).
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # CMake maps CXX_STANDARD 23 to the moving-target /std:c++latest on MSVC, and
 # MSVC 19.51 only implements C++23 under preview (full /std:c++23 needs 19.52),
 # so pin the preview flag explicitly.
