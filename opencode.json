@@ -1,0 +1,1 @@
+{"$schema": "https://opencode.ai/config.json", "mcp": {"vcpkg-query": {"command": ["python", "tools/vcpkg-query/server.py"], "enabled": true, "type": "local"}}}
