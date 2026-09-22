@@ -3,6 +3,7 @@
 #include <atltypes.h>
 #include <FLAC/format.h>
 #include <taglib/tstring.h>
+#include <kessoku/core/library_root.h>
 
 CAppModule _Module;
 
@@ -31,6 +32,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
     const TagLib::String tagString("taglib");
     OutputDebugStringW(tagString.toWString().c_str());
     OutputDebugStringA(": TagLib String constructed OK\n");
+
+    OutputDebugStringA("kessoku_core: LibraryRoot type available\n");
+    (void)kessoku::core::ErrorCode::Ok;
 
     MainWindow win;
     RECT rc = { 0, 0, 800, 600 };

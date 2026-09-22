@@ -9,6 +9,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Export compile_commands.json for clangd (advisory only; MSVC is truth).
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+enable_testing()
+
+add_subdirectory(src/core)
+
 add_executable(Kessoku WIN32 src/main.cpp)
 
 find_package(FLAC CONFIG REQUIRED)
@@ -23,6 +27,7 @@ target_include_directories(Kessoku PRIVATE
 )
 
 target_link_libraries(Kessoku PRIVATE
+    kessoku_core
     FLAC::FLAC
     TagLib::TagLib
 )
@@ -33,3 +38,5 @@ target_compile_definitions(Kessoku PRIVATE
     _UNICODE
     UNICODE
 )
+
+add_subdirectory(tests)
