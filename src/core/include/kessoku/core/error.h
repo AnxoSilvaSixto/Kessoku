@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <string_view>
 
 namespace kessoku::core {
@@ -14,7 +15,7 @@ enum class ErrorCode {
 
 struct Error {
     ErrorCode code;
-    std::string_view message;
+    std::string message;
 };
 
 } // namespace kessoku::core

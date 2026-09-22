@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <array>
+#include <string>
 #include <string_view>
 
 namespace kessoku::core {
@@ -12,8 +13,9 @@ namespace {
 constexpr DWORD kPathBufferSize = 32767;
 
 std::wstring ResolveFinalPath(std::wstring_view path) {
+    std::wstring nullTerminated(path);
     HANDLE h = CreateFileW(
-        path.data(),
+        nullTerminated.c_str(),
         FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         nullptr,

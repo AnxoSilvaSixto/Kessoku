@@ -250,6 +250,11 @@ int main() {
     // (l) The root path itself -> true
     CHECK(libRoot.Contains(root), "root path itself");
 
+    // (m) Create() with a non-existent path -> Err
+    auto errResult = kessoku::core::LibraryRoot::Create(
+        L"C:\\this\\path\\does\\not\\exist\\at\\all");
+    CHECK(errResult.IsErr(), "Create() with non-existent path returns Err");
+
     // --- Cleanup ---
     DeleteFileW(rootFile.c_str());
     DeleteFileW(nestedFile.c_str());

@@ -32,7 +32,7 @@ public:
 
     static Result Err(ErrorCode code, std::string_view message) {
         Result r;
-        new (&r.storage_[0]) Error{code, message};
+        new (&r.storage_[0]) Error{code, std::string{message}};
         r.is_ok_ = false;
         return r;
     }
@@ -64,10 +64,10 @@ public:
             new (&storage_[0]) Error(std::move(*reinterpret_cast<Error*>(&other.storage_[0])));
         }
         is_ok_ = other.is_ok_;
-        other.is_ok_ = true;
     }
 
     Result& operator=(Result&& other) noexcept {
+        if (this == &other) return *this;
         this->~Result();
         new (this) Result(std::move(other));
         return *this;
