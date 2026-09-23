@@ -6,6 +6,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Pin MSVC runtime library to match vcpkg x64-windows default (dynamic CRT).
+# CMP0091 is NEW by default (cmake_minimum_required 3.29 > policy intro 3.15).
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+
 # Export compile_commands.json for clangd (advisory only; MSVC is truth).
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
