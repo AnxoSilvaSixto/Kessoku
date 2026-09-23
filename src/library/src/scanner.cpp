@@ -103,6 +103,13 @@ void ScanDirectory(
         }
 
         if (isDir) {
+            DWORD attrs = GetFileAttributesW(entry.path().c_str());
+            if (attrs != INVALID_FILE_ATTRIBUTES &&
+                (attrs & FILE_ATTRIBUTE_REPARSE_POINT)) {
+                skipped.push_back({entry.path(),
+                    "reparse point (not followed)"});
+                continue;
+            }
             ScanDirectory(entry.path(), root, files, skipped);
         } else if (isFile) {
             std::wstring ext = entry.path().extension().wstring();

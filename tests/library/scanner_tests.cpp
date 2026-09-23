@@ -193,13 +193,11 @@ int main() {
 
         auto scanResult = kessoku::library::Scan(result.Value());
 
-        // The junction itself is a directory, not a file, so it won't appear
-        // in files. The files inside the junction resolve outside the root,
-        // so they should be in skipped (if the walk even enters the junction).
-        // With default recursive_directory_iterator behavior (no
-        // follow_directory_symlink), the junction should not be recursed into.
-        // So files.size() should be 0.
         CHECK(scanResult.files.empty(), "junction target files not in results");
+        CHECK(SkippedContainsReason(scanResult.skipped,
+                                    std::wstring_view(junctionPath),
+                                    "reparse point (not followed)"),
+              "junction appears in skipped with correct reason");
 
         DeleteFileW(junctionPath.c_str());
         RemoveDirectoryW(junctionPath.c_str());
@@ -361,6 +359,50 @@ int main() {
             printf("SKIP: broken junction test (could not create)\n");
         }
 
+        RemoveTempDir(root);
+    }
+    printf("\n");
+
+    // ================================================================
+    // Test 8: Recursive cycle junction (points back to ancestor) -> scan terminates
+    // ================================================================
+    {
+        std::wstring root = CreateTempDir(L"\\kessoku_scan_test8");
+        if (root.empty()) {
+            fprintf(stderr, "FATAL: Could not create test8 root\n");
+            return 1;
+        }
+
+        CreateSubdir(root, L"sub");
+
+        std::wstring cycleJunction = root + L"\\sub\\cycle_back";
+        bool cycleOk = CreateJunction(cycleJunction, root);
+
+        std::wstring goodFile;
+        CreateFileInDir(root, L"good.flac", &goodFile);
+
+        auto result = kessoku::core::LibraryRoot::Create(root);
+        if (!result.IsOk()) {
+            fprintf(stderr, "FATAL: LibraryRoot::Create failed: %s\n",
+                    result.GetError().message.data());
+            return 1;
+        }
+
+        auto scanResult = kessoku::library::Scan(result.Value());
+
+        CHECK(PathContains(scanResult.files, goodFile),
+              "good.flac found despite cycle junction");
+        CHECK(SkippedContainsReason(scanResult.skipped,
+                                    std::wstring_view(cycleJunction),
+                                    "reparse point (not followed)"),
+              "cycle junction skipped (scan terminated)");
+        CHECK(scanResult.files.size() == 1,
+              "only one file found (no infinite recursion)");
+
+        if (cycleOk) {
+            DeleteFileW(cycleJunction.c_str());
+            RemoveDirectoryW(cycleJunction.c_str());
+        }
         RemoveTempDir(root);
     }
     printf("\n");
