@@ -11,6 +11,8 @@ public:
 
     bool Contains(std::wstring_view candidate) const;
 
+    const std::wstring& path() const { return canonicalPath_; }
+
 private:
     explicit LibraryRoot(std::wstring canonicalPath)
         : canonicalPath_(std::move(canonicalPath)) {}
