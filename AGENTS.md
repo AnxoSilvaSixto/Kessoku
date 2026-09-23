@@ -66,9 +66,9 @@ These aren't optional background reading — invoke the matching skill before wr
 
 ## Using MCP, plugins, and LSP
 
-- Prefer a connected MCP tool over shelling out when it does the same job more safely or legibly — but the offline and filesystem invariants above apply to tool use too. No MCP tool, plugin, or LSP action may reach outside the library root/repo or make a network call, regardless of what the tool is technically capable of.
+- Prefer a connected MCP tool over shelling out when it does the same job more safely or legibly. Dev-time research network is allowed (e.g. `context7` fetching library docs) per `CLAUDE.md` §6 — but the shipped app itself must never make a runtime network call. No MCP tool, plugin, or LSP action may reach outside the library root/repo for filesystem access, regardless of what the tool is technically capable of.
 - Keep enabled MCP servers limited to the ones actually in use for this project. Each one adds to context on every turn, and that cost matters more on a local model with a smaller context budget than on a hosted one.
-- `<TODO: name the specific MCP servers and plugins enabled here, and what each is for, so future sessions don't have to guess>`
+- Enabled MCP servers: `context7` (global remote `https://mcp.context7.com/mcp`, dev-time library docs only — allowed network exception, never app runtime) and `vcpkg-query` (project local `python tools/vcpkg-query/server.py`, offline read-only vcpkg registry queries).
 
 ## Scope discipline
 
