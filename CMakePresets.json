@@ -28,7 +28,8 @@
             "binaryDir": "${sourceDir}/build-asan",
             "cacheVariables": {
                 "CMAKE_CXX_FLAGS_DEBUG": "/Ob0 /Od /Zi /fsanitize=address",
-                "CMAKE_EXE_LINKER_FLAGS_DEBUG": "/INCREMENTAL:NO"
+                "CMAKE_EXE_LINKER_FLAGS_DEBUG": "/INCREMENTAL:NO",
+                "KESSOKU_ENABLE_ASAN": "ON"
             }
         }
     ],
@@ -42,6 +43,20 @@
         {
             "name": "asan",
             "displayName": "Build (ASan Debug)",
+            "configurePreset": "asan",
+            "configuration": "Debug"
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "default",
+            "displayName": "Test (Debug)",
+            "configurePreset": "default",
+            "configuration": "Debug"
+        },
+        {
+            "name": "asan",
+            "displayName": "Test (ASan Debug)",
             "configurePreset": "asan",
             "configuration": "Debug"
         }
