@@ -10,6 +10,10 @@ enum class ErrorCode {
     NotFound,
     AccessDenied,
     InvalidPath,
+    DeviceNotFound,
+    FormatNotSupported,
+    ExclusiveModeUnavailable,
+    AudioInitFailed,
     UnknownError
 };
 

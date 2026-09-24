@@ -13,9 +13,12 @@
 #include <taglib/id3v2frame.h>
 #include <taglib/infotag.h>
 
-#include <windows.h>
+#include <FLAC/stream_encoder.h>
 
 #include <cstdio>
+#include <cstring>
+
+#include <windows.h>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -43,65 +46,117 @@ TagLib::String WstrToTagLibString(std::wstring_view wstr) {
     return TagLib::String(std::wstring(wstr));
 }
 
-// Write raw bytes to a file.
-bool WriteFileBytes(std::wstring_view path, const std::vector<unsigned char>& data) {
-    std::ofstream ofs(std::wstring(path), std::ios::binary | std::ios::trunc);
-    if (!ofs) return false;
-    ofs.write(reinterpret_cast<const char*>(data.data()), data.size());
-    return ofs.good();
-}
+// ================================================================
+// Test fixture: minimal valid FLAC via libFLAC stream encoder
+// ================================================================
 
-// Create a minimal FLAC file using ffmpeg.
 std::wstring CreateMinimalFlac(std::wstring_view dir, std::wstring_view name) {
-    std::wstring fullPath = std::wstring(dir) + L"\\" + std::wstring(name);
-    
-    // Ensure directory exists
     std::filesystem::create_directories(dir);
-    
-    // Use ffmpeg to create a 1-second mono 16-bit 44100Hz FLAC file
-    std::wstring cmd = L"cmd /c ffmpeg -y -f lavfi -i \"anullsrc=r=44100:cl=mono\" -t 1 -sample_fmt:s 16 -ar:s 44100 -c:a flac \"" + fullPath + L"\" >nul 2>&1";
-    
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi{};
-    
-    wchar_t* cmdBuf = new wchar_t[cmd.size() + 1];
-    wcscpy_s(cmdBuf, cmd.size() + 1, cmd.c_str());
-    
-    if (!CreateProcessW(NULL, cmdBuf, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-        delete[] cmdBuf;
+    std::wstring fullPath = std::wstring(dir) + L"\\" + std::wstring(name);
+
+    FLAC__StreamEncoder* encoder = FLAC__stream_encoder_new();
+    if (!encoder) return L"";
+
+    FLAC__stream_encoder_set_channels(encoder, 1);
+    FLAC__stream_encoder_set_bits_per_sample(encoder, 16);
+    FLAC__stream_encoder_set_sample_rate(encoder, 44100);
+    FLAC__stream_encoder_set_total_samples_estimate(encoder, 4410);
+
+    FILE* fp = nullptr;
+    if (_wfopen_s(&fp, fullPath.c_str(), L"wb") != 0 || !fp) {
+        FLAC__stream_encoder_delete(encoder);
         return L"";
     }
-    
-    delete[] cmdBuf;
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    
-    DWORD exitCode;
-    GetExitCodeProcess(pi.hProcess, &exitCode);
-    
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    
-    // Check if file was created
-    if (exitCode != 0) return L"";
+
+    if (FLAC__stream_encoder_init_FILE(encoder, fp,
+                                        nullptr, nullptr) != FLAC__STREAM_ENCODER_INIT_STATUS_OK) {
+        FLAC__stream_encoder_delete(encoder);
+        fclose(fp);
+        std::filesystem::remove(fullPath);
+        return L"";
+    }
+
+    std::vector<FLAC__int32> silence(4410, 0);
+    const FLAC__int32* channels[1];
+    channels[0] = silence.data();
+    FLAC__stream_encoder_process(encoder, channels, static_cast<uint32_t>(silence.size()));
+    FLAC__stream_encoder_finish(encoder);
+    FLAC__stream_encoder_delete(encoder);
+    fclose(fp);
+
     if (!std::filesystem::exists(fullPath)) return L"";
-    
     return fullPath;
 }
 
-// Create a WAV file by copying a system WAV file.
-std::wstring CreateWavFromSystem(std::wstring_view dir, std::wstring_view name) {
-    std::wstring src = L"C:\\Windows\\Media\\Alarm01.wav";
-    std::wstring dst = std::wstring(dir) + L"\\" + std::wstring(name);
-    
-    // Ensure directory exists
-    std::filesystem::create_directories(dir);
-    
-    // Copy file using Windows API
-    if (!CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
-        return L"";
+// ================================================================
+// Test fixture: minimal valid WAV with empty ID3 chunk
+// ================================================================
+
+static bool WriteRawWav(std::wstring_view path, uint32_t dataBytes) {
+    FILE* fp = nullptr;
+    if (_wfopen_s(&fp, std::wstring(path).c_str(), L"wb") != 0 || !fp) return false;
+
+    uint32_t riffSize = 4 + 24 + 8 + dataBytes; // WAVE + fmt + ID3 + data
+    uint8_t buf[256];
+
+    // RIFF header
+    memcpy(buf, "RIFF", 4);
+    memcpy(buf + 4, &riffSize, 4);
+    memcpy(buf + 8, "WAVE", 4);
+    fwrite(buf, 12, 1, fp);
+
+    // fmt chunk
+    memcpy(buf, "fmt ", 4);
+    uint32_t fmtSize = 16;
+    memcpy(buf + 4, &fmtSize, 4);
+    uint16_t pcm = 1;
+    uint16_t ch = 1;
+    uint32_t sr = 44100;
+    uint32_t br = 44100 * 2;
+    uint16_t ba = 2;
+    uint16_t bps = 16;
+    memcpy(buf + 8, &pcm, 2);
+    memcpy(buf + 10, &ch, 2);
+    memcpy(buf + 12, &sr, 4);
+    memcpy(buf + 16, &br, 4);
+    memcpy(buf + 20, &ba, 2);
+    memcpy(buf + 22, &bps, 2);
+    fwrite(buf, 24, 1, fp);
+
+    // ID3 chunk (empty ID3v2 tag: exactly 10 bytes of ID3v2 header)
+    memset(buf, 0, 256);
+    memcpy(buf, "ID3 ", 4);
+    uint32_t id3Size = 10;
+    memcpy(buf + 4, &id3Size, 4);
+    // ID3v2.3 header: "ID3" + version(3) + revision(0) + flags(0,0) + size(4, unsynced)
+    buf[8] = 3; buf[9] = 0; buf[10] = 0; buf[11] = 0;
+    // 4 zero bytes for tag content size (unsynced, not sync-safe)
+    buf[12] = 0; buf[13] = 0; buf[14] = 0; buf[15] = 0;
+    fwrite(buf, 8 + 10, 1, fp);
+
+    // data chunk
+    memcpy(buf, "data", 4);
+    memcpy(buf + 4, &dataBytes, 4);
+    fwrite(buf, 8, 1, fp);
+    if (dataBytes > 0) {
+        memset(buf, 0, 64);
+        for (uint32_t i = 0; i < dataBytes; i += 64) {
+            uint32_t toWrite = (i + 64 > dataBytes) ? (dataBytes - i) : 64;
+            fwrite(buf, 1, toWrite, fp);
+        }
     }
-    return dst;
+
+    fclose(fp);
+    return std::filesystem::exists(path);
+}
+
+std::wstring CreateMinimalWav(std::wstring_view dir, std::wstring_view name) {
+    std::filesystem::create_directories(dir);
+    std::wstring fullPath = std::wstring(dir) + L"\\" + std::wstring(name);
+
+    // 100ms of silent 16-bit mono PCM at 44100Hz = 4410 samples = 8820 bytes
+    if (!WriteRawWav(fullPath, 8820)) return L"";
+    return fullPath;
 }
 
 // Write known metadata to a FLAC file using TagLib FLAC::File.
@@ -119,15 +174,15 @@ bool StampFlacTags(std::wstring_view path,
 
     TagLib::PropertyMap rejected = f.setProperties(props);
     if (!rejected.isEmpty()) return false;
-    
+
     return f.save();
 }
 
-// Write known metadata to a WAV file using direct RIFF::WAV::File API.
+// Write known metadata to a WAV file's ID3v2 tag using RIFF::WAV::File API.
 bool StampWavDirect(std::wstring_view path,
                     std::wstring_view title, std::wstring_view artist,
                     std::wstring_view album, unsigned int trackNum) {
-    TagLib::RIFF::WAV::File f(std::wstring(path).c_str(), false);
+    TagLib::RIFF::WAV::File f(std::wstring(path).c_str(), true);
     if (!f.isValid()) return false;
 
     TagLib::PropertyMap props;
@@ -146,7 +201,7 @@ bool StampWavDirect(std::wstring_view path,
 bool StampWavInfoTag(std::wstring_view path,
                      std::wstring_view title, std::wstring_view artist,
                      std::wstring_view album, unsigned int trackNum) {
-    TagLib::RIFF::WAV::File f(std::wstring(path).c_str(), false);
+    TagLib::RIFF::WAV::File f(std::wstring(path).c_str(), true);
     if (!f.isValid()) return false;
 
     TagLib::RIFF::Info::Tag* tag = f.InfoTag();
@@ -198,8 +253,8 @@ int main() {
         Check(!flacPath.empty(), "minimal FLAC created");
 
         bool stamped = StampFlacTags(flacPath,
-                                     L"Test Title", L"Test Artist",
-                                     L"Test Album", 7);
+                                      L"Test Title", L"Test Artist",
+                                      L"Test Album", 7);
         CHECK(stamped, "FLAC tags stamped successfully");
 
         auto result = kessoku::library::ReadTrackMetadata(
@@ -222,12 +277,12 @@ int main() {
     // Test 2: WAV with all four fields in ID3v2 tag
     // ================================================================
     {
-        std::wstring wavPath = CreateWavFromSystem(root, L"full_tags.wav");
-        Check(!wavPath.empty(), "WAV copied from system");
+        std::wstring wavPath = CreateMinimalWav(root, L"full_tags.wav");
+        Check(!wavPath.empty(), "minimal WAV created");
 
         bool stamped = StampWavDirect(wavPath,
-                                      L"Wav Title", L"Wav Artist",
-                                      L"Wav Album", 3);
+                                       L"Wav Title", L"Wav Artist",
+                                       L"Wav Album", 3);
         CHECK(stamped, "WAV ID3v2 tags stamped successfully");
 
         auto result = kessoku::library::ReadTrackMetadata(
@@ -251,19 +306,19 @@ int main() {
     //         ID3v2 wins, INFO is never read
     // ================================================================
     {
-        std::wstring wavPath = CreateWavFromSystem(root, L"dual_tags.wav");
-        Check(!wavPath.empty(), "WAV copied for dual-tag test");
+        std::wstring wavPath = CreateMinimalWav(root, L"dual_tags.wav");
+        Check(!wavPath.empty(), "minimal WAV created for dual-tag test");
 
         // First stamp ID3v2
         bool id3v2Ok = StampWavDirect(wavPath,
-                                      L"ID3v2 Title", L"ID3v2 Artist",
-                                      L"ID3v2 Album", 5);
+                                       L"ID3v2 Title", L"ID3v2 Artist",
+                                       L"ID3v2 Album", 5);
         CHECK(id3v2Ok, "WAV ID3v2 tags stamped");
 
         // Then stamp RIFF INFO with different values
         bool infoOk = StampWavInfoTag(wavPath,
-                                      L"INFO Title", L"INFO Artist",
-                                      L"INFO Album", 99);
+                                       L"INFO Title", L"INFO Artist",
+                                       L"INFO Album", 99);
         CHECK(infoOk, "WAV RIFF INFO tag stamped");
 
         auto result = kessoku::library::ReadTrackMetadata(
@@ -309,8 +364,8 @@ int main() {
     // Test 5: Untagged WAV -> success with defaults
     // ================================================================
     {
-        std::wstring wavPath = CreateWavFromSystem(root, L"untagged.wav");
-        Check(!wavPath.empty(), "untagged WAV copied from system");
+        std::wstring wavPath = CreateMinimalWav(root, L"untagged.wav");
+        Check(!wavPath.empty(), "minimal untagged WAV created");
 
         auto result = kessoku::library::ReadTrackMetadata(
             std::filesystem::path(wavPath));
@@ -322,6 +377,35 @@ int main() {
             CHECK(meta.artist.empty(), "untagged WAV artist is empty");
             CHECK(meta.album.empty(), "untagged WAV album is empty");
             CHECK(meta.trackNumber == 0, "untagged WAV track number is 0");
+        }
+
+        RemoveTempDir(root);
+    }
+    printf("\n");
+
+    // ================================================================
+    // Test 5b: WAV with ONLY RIFF INFO tag (no ID3v2) -> defaults
+    // ================================================================
+    {
+        std::wstring wavPath = CreateMinimalWav(root, L"info_only.wav");
+        Check(!wavPath.empty(), "minimal WAV created for INFO-only test");
+
+        // Stamp only RIFF INFO, never write an ID3v2 tag
+        bool infoOk = StampWavInfoTag(wavPath,
+                                       L"INFO Title", L"INFO Artist",
+                                       L"INFO Album", 99);
+        CHECK(infoOk, "WAV RIFF INFO tag stamped (no ID3v2)");
+
+        auto result = kessoku::library::ReadTrackMetadata(
+            std::filesystem::path(wavPath));
+        CHECK(result.IsOk(), "INFO-only WAV -> success (not error)");
+
+        if (result.IsOk()) {
+            auto meta = result.Value();
+            CHECK(meta.title.empty(), "INFO-only WAV title is empty (not from INFO)");
+            CHECK(meta.artist.empty(), "INFO-only WAV artist is empty (not from INFO)");
+            CHECK(meta.album.empty(), "INFO-only WAV album is empty (not from INFO)");
+            CHECK(meta.trackNumber == 0, "INFO-only WAV track number is 0 (not from INFO)");
         }
 
         RemoveTempDir(root);
@@ -409,7 +493,7 @@ int main() {
     // Test 9: WAV read-only (verify via hash)
     // ================================================================
     {
-        std::wstring wavPath = CreateWavFromSystem(root, L"read_only.wav");
+        std::wstring wavPath = CreateMinimalWav(root, L"read_only.wav");
         Check(!wavPath.empty(), "minimal WAV created for read-only test");
 
         StampWavDirect(wavPath, L"RO WAV", L"WavArtist", L"WavAlbum", 2);
@@ -435,8 +519,8 @@ int main() {
         Check(!flacPath.empty(), "minimal FLAC created for partial tags test");
 
         bool stamped = StampFlacTags(flacPath,
-                                     L"Partial Title", L"",
-                                     L"", 42);
+                                      L"Partial Title", L"",
+                                      L"", 42);
         CHECK(stamped, "partial FLAC tags stamped");
 
         auto result = kessoku::library::ReadTrackMetadata(

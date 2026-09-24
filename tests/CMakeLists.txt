@@ -68,7 +68,7 @@ target_include_directories(metadata_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/shared
 )
 
-target_link_libraries(metadata_tests PRIVATE kessoku_core kessoku_library test_helpers TagLib::TagLib)
+target_link_libraries(metadata_tests PRIVATE kessoku_core kessoku_library test_helpers TagLib::TagLib FLAC::FLAC)
 
 target_compile_options(metadata_tests PRIVATE /W4)
 
@@ -80,3 +80,26 @@ target_compile_definitions(metadata_tests PRIVATE
 add_test(NAME metadata_tests COMMAND metadata_tests)
 
 kessoku_copy_asan_runtime(metadata_tests)
+
+add_executable(player_tests
+    audio/player_tests.cpp
+)
+
+target_include_directories(player_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core/include
+    ${CMAKE_SOURCE_DIR}/src/audio/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/shared
+)
+
+target_link_libraries(player_tests PRIVATE kessoku_core kessoku_audio test_helpers)
+
+target_compile_options(player_tests PRIVATE /W4)
+
+target_compile_definitions(player_tests PRIVATE
+    _UNICODE
+    UNICODE
+)
+
+add_test(NAME player_tests COMMAND player_tests)
+
+kessoku_copy_asan_runtime(player_tests)

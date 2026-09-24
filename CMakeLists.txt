@@ -38,6 +38,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 enable_testing()
 
 add_subdirectory(src/core)
+add_subdirectory(src/audio)
 
 find_package(FLAC CONFIG REQUIRED)
 find_package(TagLib CONFIG REQUIRED)
@@ -56,6 +57,7 @@ target_include_directories(Kessoku PRIVATE
 
 target_link_libraries(Kessoku PRIVATE
     kessoku_core
+    kessoku_audio
     FLAC::FLAC
     TagLib::TagLib
 )

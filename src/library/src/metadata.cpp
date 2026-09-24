@@ -51,8 +51,6 @@ core::Result<TrackMetadata> ReadTrackMetadata(const std::filesystem::path& fileP
 
     TrackMetadata meta{};
 
-    // FLAC stores tags in VorbisComment, accessible via basic Tag API
-    // WAV with ID3v2 uses property map
     if (IsFlacFile(filePath)) {
         TagLib::Tag* tag = ref.tag();
         if (tag) {
@@ -70,28 +68,44 @@ core::Result<TrackMetadata> ReadTrackMetadata(const std::filesystem::path& fileP
             }
         }
     } else {
-        // WAV (ID3v2) — use property map
-        TagLib::PropertyMap props = ref.properties();
-
-        auto it = props.find("TITLE");
-        if (it != props.end() && !it->second.isEmpty()) {
-            meta.title = TagLibStringToWString(it->second.front());
+        // WAV — use FileRef's internal WAV file directly.
+        TagLib::RIFF::WAV::File* wavFile =
+            dynamic_cast<TagLib::RIFF::WAV::File*>(ref.file());
+        if (!wavFile || !wavFile->isValid()) {
+            return core::Result<TrackMetadata>::Err(
+                core::ErrorCode::UnknownError,
+                "Could not open or parse file: " + filePath.string()
+            );
         }
 
-        it = props.find("ARTIST");
-        if (it != props.end() && !it->second.isEmpty()) {
-            meta.artist = TagLibStringToWString(it->second.front());
-        }
+        if (wavFile->hasID3v2Tag()) {
+            TagLib::ID3v2::Tag* id3v2 = wavFile->ID3v2Tag();
+            if (id3v2) {
+                TagLib::PropertyMap props = id3v2->properties();
 
-        it = props.find("ALBUM");
-        if (it != props.end() && !it->second.isEmpty()) {
-            meta.album = TagLibStringToWString(it->second.front());
-        }
+                auto it = props.find("TITLE");
+                if (it != props.end() && !it->second.isEmpty()) {
+                    meta.title = TagLibStringToWString(it->second.front());
+                }
 
-        it = props.find("TRACKNUMBER");
-        if (it != props.end() && !it->second.isEmpty()) {
-            meta.trackNumber = ParseTrackNumber(it->second.front());
+                it = props.find("ARTIST");
+                if (it != props.end() && !it->second.isEmpty()) {
+                    meta.artist = TagLibStringToWString(it->second.front());
+                }
+
+                it = props.find("ALBUM");
+                if (it != props.end() && !it->second.isEmpty()) {
+                    meta.album = TagLibStringToWString(it->second.front());
+                }
+
+                it = props.find("TRACKNUMBER");
+                if (it != props.end() && !it->second.isEmpty()) {
+                    meta.trackNumber = ParseTrackNumber(it->second.front());
+                }
+            }
         }
+        // If no ID3v2 tag: meta stays at defaults (all fields empty/0).
+        // We never read from InfoTag().
     }
 
     return core::Result<TrackMetadata>::Ok(std::move(meta));
