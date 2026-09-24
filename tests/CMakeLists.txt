@@ -57,3 +57,26 @@ target_compile_definitions(scanner_tests PRIVATE
 add_test(NAME scanner_tests COMMAND scanner_tests)
 
 kessoku_copy_asan_runtime(scanner_tests)
+
+add_executable(metadata_tests
+    library/metadata_tests.cpp
+)
+
+target_include_directories(metadata_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core/include
+    ${CMAKE_SOURCE_DIR}/src/library/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/shared
+)
+
+target_link_libraries(metadata_tests PRIVATE kessoku_core kessoku_library test_helpers TagLib::TagLib)
+
+target_compile_options(metadata_tests PRIVATE /W4)
+
+target_compile_definitions(metadata_tests PRIVATE
+    _UNICODE
+    UNICODE
+)
+
+add_test(NAME metadata_tests COMMAND metadata_tests)
+
+kessoku_copy_asan_runtime(metadata_tests)

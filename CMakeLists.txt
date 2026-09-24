@@ -39,16 +39,16 @@ enable_testing()
 
 add_subdirectory(src/core)
 
-add_subdirectory(src/library)
-
-add_executable(Kessoku WIN32 src/main.cpp)
-
 find_package(FLAC CONFIG REQUIRED)
 find_package(TagLib CONFIG REQUIRED)
 
 # WTL is header-only with no CMake config (headers live directly in
 # vcpkg's include/ dir, e.g. atlapp.h), so locate its include dir.
 find_path(WTL_INCLUDE_DIR NAMES atlapp.h REQUIRED)
+
+add_subdirectory(src/library)
+
+add_executable(Kessoku WIN32 src/main.cpp)
 
 target_include_directories(Kessoku PRIVATE
     ${WTL_INCLUDE_DIR}
