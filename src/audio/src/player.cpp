@@ -791,7 +791,7 @@ PlaybackState Player::GetState() const noexcept {
     return state_.load();
 }
 
-uint32_t Player::GetPosition() const noexcept {
+uint32_t Player::GetPosition() const {
     AssertCallingThread();
     std::lock_guard<std::mutex> lock(positionMutex_);
     return currentFrame_;

@@ -91,7 +91,7 @@ public:
     PlaybackState GetState() const noexcept;
 
     // Get the current playback position in frames.
-    uint32_t GetPosition() const noexcept;
+    uint32_t GetPosition() const;
 
     // Get the total duration in frames.
     uint32_t GetTotalFrames() const noexcept;
