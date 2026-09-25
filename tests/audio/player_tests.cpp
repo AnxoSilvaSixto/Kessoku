@@ -1,9 +1,13 @@
 #include "kessoku/audio/player.h"
+#include "kessoku/audio/flac_format.h"
 #include "kessoku/audio/wav_format.h"
 
 #include <windows.h>
 
+#include <FLAC/stream_encoder.h>
+
 #include <array>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -99,6 +103,105 @@ std::wstring CreateTempWav(std::wstring_view prefix, uint32_t sampleRate,
 
 // Clean up a temp WAV file and its parent directory.
 void CleanupTempWav(std::wstring_view path) {
+    DeleteFileW(path.data());
+    std::wstring dir = std::wstring(path).substr(
+        0, std::wstring(path).find_last_of(L'\\'));
+    RemoveDirectoryW(dir.c_str());
+}
+
+// Minimal FLAC file builder using libFLAC: encodes a linear ramp
+// (value = baseValue + frameIndex * step, same in every channel) with the
+// given parameters. Silence when baseValue == step == 0. The caller must
+// keep values inside the bit depth's range. Returns false if the encoder
+// rejects the parameters.
+bool CreateTestFlac(std::wstring_view path, uint32_t sampleRate,
+                    uint32_t bitsPerSample, uint32_t channelCount,
+                    uint32_t numFrames, FLAC__int32 baseValue = 0,
+                    FLAC__int32 step = 0) {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, std::wstring(path).c_str(), L"w+b") != 0 ||
+        file == nullptr) {
+        return false;
+    }
+
+    FLAC__StreamEncoder* encoder = FLAC__stream_encoder_new();
+    if (encoder == nullptr) {
+        fclose(file);
+        return false;
+    }
+
+    bool ok = true;
+    ok = ok && FLAC__stream_encoder_set_channels(encoder, channelCount) != 0;
+    ok = ok &&
+         FLAC__stream_encoder_set_bits_per_sample(encoder, bitsPerSample) != 0;
+    ok = ok && FLAC__stream_encoder_set_sample_rate(encoder, sampleRate) != 0;
+    ok = ok && FLAC__stream_encoder_set_total_samples_estimate(
+                     encoder, numFrames) != 0;
+    ok = ok && FLAC__stream_encoder_set_compression_level(encoder, 0) != 0;
+    if (ok) {
+        // On success the encoder owns `file` and closes it on finish().
+        ok = FLAC__stream_encoder_init_FILE(encoder, file, nullptr,
+                                            nullptr) ==
+             FLAC__STREAM_ENCODER_INIT_STATUS_OK;
+    }
+    if (ok && numFrames > 0) {
+        std::vector<FLAC__int32> frame(
+            static_cast<size_t>(channelCount) * 4096, 0);
+        uint32_t remaining = numFrames;
+        uint32_t frameIndex = 0;
+        while (ok && remaining > 0) {
+            uint32_t chunk = remaining > 4096 ? 4096 : remaining;
+            for (uint32_t i = 0; i < chunk; ++i) {
+                FLAC__int32 value =
+                    baseValue +
+                    static_cast<FLAC__int32>(frameIndex + i) * step;
+                for (uint32_t c = 0; c < channelCount; ++c) {
+                    frame[static_cast<size_t>(i) * channelCount + c] = value;
+                }
+            }
+            ok = FLAC__stream_encoder_process_interleaved(
+                     encoder, frame.data(), chunk) != 0;
+            frameIndex += chunk;
+            remaining -= chunk;
+        }
+    }
+    if (ok) {
+        ok = FLAC__stream_encoder_finish(encoder) != 0;
+    }
+    FLAC__stream_encoder_delete(encoder);
+    if (!ok) {
+        // Init or encode failed: the encoder never took ownership.
+        fclose(file);
+        DeleteFileW(std::wstring(path).c_str());
+    }
+    return ok;
+}
+
+// Create a temp FLAC file and return its path.
+std::wstring CreateTempFlac(std::wstring_view prefix, uint32_t sampleRate,
+                            uint32_t bitsPerSample, uint32_t channels,
+                            uint32_t frames, FLAC__int32 baseValue = 0,
+                            FLAC__int32 step = 0) {
+    wchar_t buf[MAX_PATH]{};
+    DWORD len = GetTempPathW(MAX_PATH, buf);
+    if (len == 0 || len > MAX_PATH) return {};
+
+    std::wstring tempDir = std::wstring(buf) + std::wstring(prefix);
+    if (!CreateDirectoryW(tempDir.c_str(), nullptr) &&
+        GetLastError() != ERROR_ALREADY_EXISTS) {
+        return {};
+    }
+
+    std::wstring name = tempDir + L"\\test.flac";
+    if (CreateTestFlac(name, sampleRate, bitsPerSample, channels, frames,
+                       baseValue, step)) {
+        return name;
+    }
+    return {};
+}
+
+// Clean up a temp FLAC file and its parent directory.
+void CleanupTempFlac(std::wstring_view path) {
     DeleteFileW(path.data());
     std::wstring dir = std::wstring(path).substr(
         0, std::wstring(path).find_last_of(L'\\'));
@@ -394,6 +497,372 @@ int main() {
                   result.GetError().code ==
                       kessoku::core::ErrorCode::DeviceNotFound,
                   "Error code is AudioInitFailed or DeviceNotFound");
+        }
+    }
+
+    // --- Test 9: FLAC STREAMINFO probe extracts the file format ---
+    {
+        std::wstring flacPath = CreateTempFlac(
+            L"\\kessoku_test_flac9_", 44100, 16, 2, 44100); // 1 second
+        CHECK(!flacPath.empty(), "Create temp FLAC file");
+
+        if (!flacPath.empty()) {
+            kessoku::audio::FlacFormat fmt;
+            std::string err =
+                kessoku::audio::ParseFlacFormat(flacPath, fmt);
+            CHECK(err.empty(), "ParseFlacFormat succeeds for valid FLAC");
+            CHECK(fmt.sampleRate == 44100,
+                  "FLAC sample rate matches STREAMINFO");
+            CHECK(fmt.channelCount == 2,
+                  "FLAC channel count matches STREAMINFO");
+            CHECK(fmt.bitsPerSample == 16,
+                  "FLAC bit depth matches STREAMINFO");
+            CHECK(fmt.totalSamples == 44100,
+                  "FLAC total samples matches STREAMINFO");
+
+            CleanupTempFlac(flacPath);
+        }
+    }
+
+    // --- Test 10: FLAC frame packing is exact for 8/16/24/32-bit ---
+    {
+        // Stereo 16-bit: known samples, interleaved little-endian.
+        {
+            const int32_t left[] = {0x0102, -2};
+            const int32_t right[] = {0x0304, 0x7FFF};
+            const int32_t* channels[] = {left, right};
+            std::vector<uint8_t> out;
+            bool ok = kessoku::audio::AppendFlacFramePcm(out, channels, 2, 2,
+                                                        16);
+            CHECK(ok, "Pack 16-bit stereo frame");
+            const uint8_t expected[] = {0x02, 0x01, 0x04, 0x03,
+                                        0xFE, 0xFF, 0xFF, 0x7F};
+            CHECK(out.size() == sizeof(expected),
+                  "16-bit stereo packed size");
+            CHECK(std::memcmp(out.data(), expected, sizeof(expected)) == 0,
+                  "16-bit stereo packed bytes exact");
+        }
+        // Mono 8-bit: signed FLAC samples map to unsigned PCM.
+        {
+            const int32_t mono[] = {-128, 0, 127};
+            const int32_t* channels[] = {mono};
+            std::vector<uint8_t> out;
+            bool ok = kessoku::audio::AppendFlacFramePcm(out, channels, 1, 3,
+                                                        8);
+            CHECK(ok, "Pack 8-bit mono frame");
+            const uint8_t expected[] = {0x00, 0x80, 0xFF};
+            CHECK(out.size() == sizeof(expected), "8-bit mono packed size");
+            CHECK(std::memcmp(out.data(), expected, sizeof(expected)) == 0,
+                  "8-bit mono packed bytes exact");
+        }
+        // Stereo 24-bit: low 3 bytes, little-endian.
+        {
+            const int32_t left[] = {0x010203};
+            const int32_t right[] = {-1};
+            const int32_t* channels[] = {left, right};
+            std::vector<uint8_t> out;
+            bool ok = kessoku::audio::AppendFlacFramePcm(out, channels, 2, 1,
+                                                        24);
+            CHECK(ok, "Pack 24-bit stereo frame");
+            const uint8_t expected[] = {0x03, 0x02, 0x01, 0xFF, 0xFF, 0xFF};
+            CHECK(out.size() == sizeof(expected),
+                  "24-bit stereo packed size");
+            CHECK(std::memcmp(out.data(), expected, sizeof(expected)) == 0,
+                  "24-bit stereo packed bytes exact");
+        }
+        // Mono 32-bit: full word, little-endian.
+        {
+            const int32_t mono[] = {0x01020304};
+            const int32_t* channels[] = {mono};
+            std::vector<uint8_t> out;
+            bool ok = kessoku::audio::AppendFlacFramePcm(out, channels, 1, 1,
+                                                        32);
+            CHECK(ok, "Pack 32-bit mono frame");
+            const uint8_t expected[] = {0x04, 0x03, 0x02, 0x01};
+            CHECK(out.size() == sizeof(expected),
+                  "32-bit mono packed size");
+            CHECK(std::memcmp(out.data(), expected, sizeof(expected)) == 0,
+                  "32-bit mono packed bytes exact");
+        }
+        // Unsupported depth is rejected, never converted.
+        {
+            const int32_t mono[] = {0};
+            const int32_t* channels[] = {mono};
+            std::vector<uint8_t> out;
+            CHECK(!kessoku::audio::AppendFlacFramePcm(out, channels, 1, 1,
+                                                     12),
+                  "Pack rejects 12-bit depth");
+            CHECK(out.empty(), "Rejected pack appends nothing");
+        }
+    }
+
+    // --- Test 11: Corrupted/truncated FLAC fails cleanly at Create() ---
+    {
+        wchar_t buf[MAX_PATH]{};
+        DWORD len = GetTempPathW(MAX_PATH, buf);
+        if (len > 0 && len <= MAX_PATH) {
+            std::wstring tempDir =
+                std::wstring(buf) + L"\\kessoku_test_flac11_";
+            if (CreateDirectoryW(tempDir.c_str(), nullptr) ||
+                GetLastError() == ERROR_ALREADY_EXISTS) {
+                // Case A: garbage bytes with a .flac extension.
+                std::wstring garbage = tempDir + L"\\garbage.flac";
+                HANDLE hFile = CreateFileW(
+                    garbage.data(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (hFile != INVALID_HANDLE_VALUE) {
+                    const char junk[] = "this is not a FLAC file at all";
+                    WriteFile(hFile, junk, sizeof(junk) - 1, nullptr,
+                              nullptr);
+                    CloseHandle(hFile);
+
+                    auto result =
+                        kessoku::audio::Player::Create(garbage);
+                    CHECK(result.IsErr(),
+                          "Player::Create fails for garbage FLAC");
+
+                    DeleteFileW(garbage.data());
+                }
+
+                // Case B: valid FLAC header truncated mid-stream.
+                std::wstring full = tempDir + L"\\full.flac";
+                if (CreateTestFlac(full, 44100, 16, 2, 44100)) {
+                    std::wstring truncated = tempDir + L"\\truncated.flac";
+                    HANDLE hSrc = CreateFileW(
+                        full.data(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                    HANDLE hDst = CreateFileW(
+                        truncated.data(), GENERIC_WRITE, 0, nullptr,
+                        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                    if (hSrc != INVALID_HANDLE_VALUE &&
+                        hDst != INVALID_HANDLE_VALUE) {
+                        uint8_t head[64]{};
+                        DWORD bytesRead = 0;
+                        if (ReadFile(hSrc, head, sizeof(head), &bytesRead,
+                                     nullptr) &&
+                            bytesRead > 0) {
+                            WriteFile(hDst, head, bytesRead, nullptr,
+                                      nullptr);
+                        }
+                    }
+                    if (hSrc != INVALID_HANDLE_VALUE) CloseHandle(hSrc);
+                    if (hDst != INVALID_HANDLE_VALUE) CloseHandle(hDst);
+
+                    auto result =
+                        kessoku::audio::Player::Create(truncated);
+                    CHECK(result.IsErr(),
+                          "Player::Create fails for truncated FLAC");
+
+                    DeleteFileW(truncated.data());
+                    DeleteFileW(full.data());
+                }
+                RemoveDirectoryW(tempDir.c_str());
+            }
+        }
+    }
+
+    // --- Test 12: FLAC bit depth without an exact PCM container is
+    // --- FormatNotSupported (no conversion, no fallback) ---
+    {
+        std::wstring flacPath = CreateTempFlac(
+            L"\\kessoku_test_flac12_", 44100, 12, 2, 4410);
+        CHECK(!flacPath.empty(), "Create 12-bit temp FLAC file");
+
+        if (!flacPath.empty()) {
+            auto result = kessoku::audio::Player::Create(flacPath);
+            CHECK(result.IsErr(),
+                  "Player::Create fails for 12-bit FLAC");
+            if (result.IsErr()) {
+                CHECK(result.GetError().code ==
+                          kessoku::core::ErrorCode::FormatNotSupported,
+                      "Error code is FormatNotSupported");
+            }
+
+            CleanupTempFlac(flacPath);
+        }
+    }
+
+    // --- Test 13: Create Player from a valid FLAC file ---
+    {
+        std::wstring flacPath = CreateTempFlac(
+            L"\\kessoku_test_flac13_", 44100, 16, 2, 44100); // 1 second
+        CHECK(!flacPath.empty(), "Create temp FLAC for lifecycle test");
+
+        if (!flacPath.empty()) {
+            auto result = kessoku::audio::Player::Create(flacPath);
+            CHECK(result.IsOk(), "Player::Create succeeds for valid FLAC");
+
+            if (result.IsOk()) {
+                auto& player = result.Value();
+                CHECK(player.GetSampleRate() == 44100,
+                      "FLAC sample rate matches file");
+                CHECK(player.GetTotalFrames() == 44100,
+                      "FLAC total frames matches file");
+                CHECK(player.GetPosition() == 0,
+                      "FLAC initial position is 0");
+                CHECK(player.GetState() ==
+                          kessoku::audio::PlaybackState::Stopped,
+                      "FLAC initial state is Stopped");
+
+                player.Stop();
+            }
+
+            CleanupTempFlac(flacPath);
+        }
+    }
+
+    // --- Test 14: FLAC Play -> Pause -> Resume -> Stop ---
+    {
+        std::wstring flacPath = CreateTempFlac(
+            L"\\kessoku_test_flac14_", 22050, 16, 1, 22050); // 1 second mono
+        CHECK(!flacPath.empty(), "Create temp FLAC for state test");
+
+        if (!flacPath.empty()) {
+            auto result = kessoku::audio::Player::Create(flacPath);
+            CHECK(result.IsOk(), "Player::Create for FLAC state test");
+
+            if (result.IsOk()) {
+                auto player = std::move(result.Value());
+
+                CHECK(player.GetState() ==
+                          kessoku::audio::PlaybackState::Stopped,
+                      "FLAC initial state is Stopped");
+
+                auto playStatus = player.Play();
+                CHECK(playStatus.IsOk(), "FLAC Play() succeeds");
+
+                Sleep(100);
+
+                CHECK(player.GetState() ==
+                          kessoku::audio::PlaybackState::Playing,
+                      "FLAC state is Playing after Play()");
+
+                auto pauseStatus = player.Pause();
+                CHECK(pauseStatus.IsOk(), "FLAC Pause() succeeds");
+                CHECK(player.GetState() ==
+                          kessoku::audio::PlaybackState::Paused,
+                      "FLAC state is Paused after Pause()");
+
+                auto resumeStatus = player.Resume();
+                CHECK(resumeStatus.IsOk(), "FLAC Resume() succeeds");
+                CHECK(player.GetState() ==
+                          kessoku::audio::PlaybackState::Playing,
+                      "FLAC state is Playing after Resume()");
+
+                auto stopStatus = player.Stop();
+                CHECK(stopStatus.IsOk(), "FLAC Stop() succeeds");
+                CHECK(player.GetState() ==
+                          kessoku::audio::PlaybackState::Stopped,
+                      "FLAC state is Stopped after Stop()");
+            }
+
+            CleanupTempFlac(flacPath);
+        }
+    }
+
+    // --- Test 15: FLAC Seek repositions playback ---
+    {
+        std::wstring flacPath = CreateTempFlac(
+            L"\\kessoku_test_flac15_", 44100, 16, 2, 44100);
+        CHECK(!flacPath.empty(), "Create temp FLAC for seek test");
+
+        if (!flacPath.empty()) {
+            auto result = kessoku::audio::Player::Create(flacPath);
+            CHECK(result.IsOk(), "Player::Create for FLAC seek test");
+
+            if (result.IsOk()) {
+                auto player = std::move(result.Value());
+
+                auto playStatus = player.Play();
+                CHECK(playStatus.IsOk(), "Play() for FLAC seek test");
+
+                Sleep(100);
+
+                uint32_t posBefore = player.GetPosition();
+                CHECK(posBefore <= 44100,
+                      "FLAC position before seek is within total frames");
+
+                auto seekStatus = player.Seek(10000);
+                CHECK(seekStatus.IsOk(), "FLAC Seek() succeeds");
+                CHECK(player.GetPosition() == 10000,
+                      "FLAC position is 10000 after Seek(10000)");
+
+                player.Stop();
+            }
+
+            CleanupTempFlac(flacPath);
+        }
+    }
+
+    // --- Test 16: FlacReader decodes bit-exact PCM with seek (no device) ---
+    {
+        // 9000 mono frames span several FLAC blocks, so sub-block reads
+        // exercise the FIFO bridging. Ramp values stay inside int16 range.
+        const uint32_t kFrames = 9000;
+        const FLAC__int32 kBase = -9000;
+        const FLAC__int32 kStep = 2;
+        std::wstring flacPath = CreateTempFlac(
+            L"\\kessoku_test_flac16_", 44100, 16, 1, kFrames, kBase, kStep);
+        CHECK(!flacPath.empty(), "Create ramp FLAC file");
+
+        if (!flacPath.empty()) {
+            kessoku::audio::FlacFormat fmt;
+            CHECK(kessoku::audio::ParseFlacFormat(flacPath, fmt).empty(),
+                  "Probe ramp FLAC file");
+
+            auto expectedBytes = [&](uint32_t first, uint32_t count) {
+                std::vector<uint8_t> bytes;
+                bytes.reserve(static_cast<size_t>(count) * 2);
+                for (uint32_t i = 0; i < count; ++i) {
+                    FLAC__int32 v =
+                        kBase + static_cast<FLAC__int32>(first + i) * kStep;
+                    bytes.push_back(static_cast<uint8_t>(v & 0xFF));
+                    bytes.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+                }
+                return bytes;
+            };
+
+            kessoku::audio::FlacReader reader;
+            CHECK(reader.Open(flacPath, fmt, 0).empty(),
+                  "FlacReader::Open succeeds");
+            CHECK(reader.IsOpen(), "FlacReader is open");
+
+            std::vector<uint8_t> decoded;
+            decoded.reserve(static_cast<size_t>(kFrames) * 2);
+            std::vector<uint8_t> chunk(1000 * 2);
+            uint32_t totalRead = 0;
+            for (int n = 0; n < 9; ++n) {
+                uint32_t got = reader.ReadFrames(chunk.data(), 1000);
+                CHECK(got == 1000, "Read 1000 frames per call");
+                decoded.insert(decoded.end(), chunk.begin(),
+                               chunk.begin() + got * 2);
+                totalRead += got;
+            }
+            CHECK(totalRead == kFrames, "Read all frames");
+            CHECK(reader.ReadFrames(chunk.data(), 1000) == 0,
+                  "Read past end returns 0");
+            CHECK(!reader.HadError(), "No decode error");
+            CHECK(decoded == expectedBytes(0, kFrames),
+                  "Decoded PCM is bit-exact");
+
+            CHECK(reader.Seek(500), "FlacReader::Seek(500) succeeds");
+            uint32_t got = reader.ReadFrames(chunk.data(), 100);
+            CHECK(got == 100, "Read 100 frames after seek");
+            CHECK(std::memcmp(chunk.data(),
+                              expectedBytes(500, 100).data(), 200) == 0,
+                  "Seek(500) position is sample-accurate");
+
+            CHECK(reader.Seek(0), "FlacReader::Seek(0) succeeds");
+            got = reader.ReadFrames(chunk.data(), 10);
+            CHECK(got == 10, "Read 10 frames after re-seek");
+            CHECK(std::memcmp(chunk.data(), expectedBytes(0, 10).data(),
+                              20) == 0,
+                  "Seek(0) position is sample-accurate");
+
+            reader.Close();
+            CHECK(!reader.IsOpen(), "FlacReader closed");
+
+            CleanupTempFlac(flacPath);
         }
     }
 

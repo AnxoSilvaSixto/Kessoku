@@ -37,11 +37,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 enable_testing()
 
-add_subdirectory(src/core)
-add_subdirectory(src/audio)
-
 find_package(FLAC CONFIG REQUIRED)
 find_package(TagLib CONFIG REQUIRED)
+
+add_subdirectory(src/core)
+add_subdirectory(src/audio)
 
 # WTL is header-only with no CMake config (headers live directly in
 # vcpkg's include/ dir, e.g. atlapp.h), so locate its include dir.

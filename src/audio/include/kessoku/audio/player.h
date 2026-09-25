@@ -1,6 +1,7 @@
 #pragma once
 
 #include "kessoku/core/result.h"
+#include "kessoku/audio/flac_format.h"
 #include "kessoku/audio/wav_format.h"
 
 #include <cstdint>
@@ -16,6 +17,11 @@ enum class PlaybackState {
     Playing,
     Paused,
     DeviceLost
+};
+
+enum class SourceKind {
+    Wav,
+    Flac
 };
 
 class Player {
@@ -36,10 +42,14 @@ public:
           dataChunkSize_(other.dataChunkSize_),
           filePosition_(other.filePosition_),
           format_(other.format_),
+          flacFormat_(other.flacFormat_),
+          sourceKind_(other.sourceKind_),
+          flacReader_(std::move(other.flacReader_)),
           totalFrames_(other.totalFrames_),
           bufferFrameCount_(other.bufferFrameCount_),
           bytesPerFrame_(other.bytesPerFrame_),
           currentFrame_(other.currentFrame_),
+          ownsCom_(other.ownsCom_),
           state_(other.state_) {
         other.pEnumerator_ = nullptr;
         other.pDevice_ = nullptr;
@@ -48,10 +58,11 @@ public:
         other.hEvent_ = nullptr;
         other.hFile_ = nullptr;
         other.currentFrame_ = 0;
+        other.ownsCom_ = false;
         other.state_ = PlaybackState::Stopped;
     }
 
-    // Initialize the player for a specific WAV file.
+    // Initialize the player for a specific audio file (.wav or .flac).
     // Parses the file format, enumerates the default render device,
     // and negotiates exclusive-mode format support.
     // Does NOT start playback.
@@ -87,9 +98,12 @@ public:
     ~Player();
 
 private:
-    explicit Player(std::wstring wavPath, WavFormat format, uint32_t totalFrames)
+    explicit Player(std::wstring wavPath, WavFormat format, uint32_t totalFrames,
+                    SourceKind sourceKind, FlacFormat flacFormat)
         : wavPath_(std::move(wavPath)),
           format_(format),
+          flacFormat_(flacFormat),
+          sourceKind_(sourceKind),
           totalFrames_(totalFrames),
           state_(PlaybackState::Stopped) {}
 
@@ -108,6 +122,9 @@ private:
 
     // Read frames from the WAV file into a buffer.
     uint32_t ReadFrames(uint8_t* buffer, uint32_t maxFrames);
+
+    // Open the FLAC stream for decoding from the current position.
+    void OpenFlacFile();
 
     // COM pointers
     void* pEnumerator_ = nullptr;
@@ -129,12 +146,20 @@ private:
     uint64_t filePosition_ = 0;
 
     WavFormat format_;
+    FlacFormat flacFormat_;
+    SourceKind sourceKind_ = SourceKind::Wav;
+    FlacReader flacReader_;
     uint32_t totalFrames_;
     uint32_t bufferFrameCount_ = 0;
     uint32_t bytesPerFrame_ = 0;
 
     // File read state (accessed only from render thread)
     uint32_t currentFrame_ = 0;
+
+    // True while this instance owes CoUninitialize() for the apartment
+    // entered during Create(). Guards Stop() idempotency: COM must be
+    // uninitialized exactly once per successful Create().
+    bool ownsCom_ = false;
 
     PlaybackState state_ = PlaybackState::Stopped;
 };

@@ -91,7 +91,7 @@ target_include_directories(player_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/shared
 )
 
-target_link_libraries(player_tests PRIVATE kessoku_core kessoku_audio test_helpers)
+target_link_libraries(player_tests PRIVATE kessoku_core kessoku_audio test_helpers FLAC::FLAC)
 
 target_compile_options(player_tests PRIVATE /W4)
 

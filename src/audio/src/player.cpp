@@ -1,4 +1,5 @@
 #include "kessoku/audio/player.h"
+#include "kessoku/audio/flac_format.h"
 #include "kessoku/audio/wav_format.h"
 
 #define NOMINMAX
@@ -10,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <cwctype>
 #include <string>
 #include <vector>
 
@@ -97,7 +99,9 @@ bool FindDataChunk(const std::wstring& path, uint64_t& outOffset, uint64_t& outS
         return false;
     }
 
-    // Scan chunks
+    // Scan chunks. `pos` tracks the chunk header offset; the file read
+    // cursor advances past id+size on each read, so skipping a chunk
+    // means header (8 bytes) + payload (+1 pad byte when odd).
     LARGE_INTEGER pos;
     pos.QuadPart = 12; // Skip RIFF header
     SetFilePointerEx(hFile, pos, nullptr, FILE_BEGIN);
@@ -121,14 +125,14 @@ bool FindDataChunk(const std::wstring& path, uint64_t& outOffset, uint64_t& outS
         }
 
         if (std::memcmp(chunkId, "data", 4) == 0) {
-            outOffset = pos.QuadPart;
+            outOffset = static_cast<uint64_t>(pos.QuadPart + 8);
             outSize = chunkSize;
             CloseHandle(hFile);
             return true;
         }
 
-        // Skip chunk (align to 2 bytes)
-        pos.QuadPart += chunkSize;
+        // Skip chunk payload (align to 2 bytes)
+        pos.QuadPart += 8 + chunkSize;
         if (chunkSize % 2 != 0) {
             pos.QuadPart += 1;
         }
@@ -136,17 +140,84 @@ bool FindDataChunk(const std::wstring& path, uint64_t& outOffset, uint64_t& outS
     }
 }
 
+// Case-insensitive ".flac" extension check.
+// Takes a view because Create() receives one; the view may not be
+// NUL-terminated, so compare character by character.
+bool HasFlacExtension(std::wstring_view path) {
+    if (path.size() < 5) {
+        return false;
+    }
+    const wchar_t* ext = path.data() + path.size() - 5;
+    return ext[0] == L'.' && std::towlower(ext[1]) == L'f' &&
+           std::towlower(ext[2]) == L'l' && std::towlower(ext[3]) == L'a' &&
+           std::towlower(ext[4]) == L'c';
+}
+
 } // namespace
 
 namespace kessoku::audio {
 
 core::Result<Player> Player::Create(std::wstring_view wavPath) {
+    const bool isFlac = HasFlacExtension(wavPath);
+    const char* formatKind = isFlac ? "FLAC" : "WAV";
+
     WavFormat fileFormat{};
-    std::string parseError = ParseWavFormat(std::wstring(wavPath), fileFormat);
-    if (!parseError.empty()) {
-        return core::Result<Player>::Err(
-            core::ErrorCode::AudioInitFailed,
-            "WAV format parse failed: " + parseError);
+    FlacFormat flacFormat{};
+    const SourceKind sourceKind =
+        isFlac ? SourceKind::Flac : SourceKind::Wav;
+    uint32_t totalFrames = 0;
+    uint64_t dataChunkOffset = 0;
+    uint64_t dataChunkSize = 0;
+
+    if (isFlac) {
+        std::string parseError =
+            ParseFlacFormat(std::wstring(wavPath), flacFormat);
+        if (!parseError.empty()) {
+            return core::Result<Player>::Err(
+                core::ErrorCode::AudioInitFailed,
+                "FLAC format parse failed: " + parseError);
+        }
+        // Only bit depths with an exact PCM wire container are playable.
+        // Anything else would need bit-depth conversion, which the
+        // bit-perfect requirement forbids, so fail the same clean
+        // FormatNotSupported path device negotiation failures use.
+        if (flacFormat.bitsPerSample != 8 &&
+            flacFormat.bitsPerSample != 16 &&
+            flacFormat.bitsPerSample != 24 &&
+            flacFormat.bitsPerSample != 32) {
+            return core::Result<Player>::Err(
+                core::ErrorCode::FormatNotSupported,
+                "FLAC bit depth has no exact exclusive-mode PCM container");
+        }
+        if (flacFormat.channelCount == 0 || flacFormat.channelCount > 8) {
+            return core::Result<Player>::Err(
+                core::ErrorCode::FormatNotSupported,
+                "FLAC channel count not supported in exclusive mode");
+        }
+        if (flacFormat.totalSamples == 0 ||
+            flacFormat.totalSamples > UINT32_MAX) {
+            return core::Result<Player>::Err(
+                core::ErrorCode::AudioInitFailed,
+                "FLAC total sample count unknown or too large");
+        }
+        fileFormat.sampleRate = flacFormat.sampleRate;
+        fileFormat.bitsPerSample =
+            static_cast<uint16_t>(flacFormat.bitsPerSample);
+        fileFormat.channelCount =
+            static_cast<uint16_t>(flacFormat.channelCount);
+        fileFormat.blockAlign = static_cast<uint16_t>(
+            flacFormat.channelCount * (flacFormat.bitsPerSample / 8));
+        fileFormat.byteRate =
+            flacFormat.sampleRate * fileFormat.blockAlign;
+        totalFrames = static_cast<uint32_t>(flacFormat.totalSamples);
+    } else {
+        std::string parseError =
+            ParseWavFormat(std::wstring(wavPath), fileFormat);
+        if (!parseError.empty()) {
+            return core::Result<Player>::Err(
+                core::ErrorCode::AudioInitFailed,
+                "WAV format parse failed: " + parseError);
+        }
     }
 
     HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -216,7 +287,8 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
         CoUninitialize();
         return core::Result<Player>::Err(
             core::ErrorCode::FormatNotSupported,
-            "Device does not support this WAV format in exclusive mode");
+            std::string("Device does not support this ") + formatKind +
+                " format in exclusive mode");
     } else {
         pAudioClient->Release();
         pDevice->Release();
@@ -261,6 +333,21 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
         pDevice->Release();
         pEnumerator->Release();
         CoUninitialize();
+
+        // Re-enter COM: the teardown above balanced the CoInitializeEx at
+        // the top of Create(), so the re-created device objects below need
+        // a fresh apartment (otherwise CoCreateInstance fails with
+        // CO_E_NOTINITIALIZED and every device needing buffer-size
+        // alignment becomes unusable).
+        hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        if (hr == RPC_E_CHANGED_MODE) {
+            hr = S_OK;
+        }
+        if (FAILED(hr)) {
+            return core::Result<Player>::Err(
+                core::ErrorCode::AudioInitFailed,
+                "Re-init failed after buffer alignment");
+        }
 
         hr = CoCreateInstance(
             __uuidof(MMDeviceEnumerator), nullptr,
@@ -363,25 +450,28 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
             "Could not get IAudioRenderClient");
     }
 
-    // Find data chunk offset and size.
-    uint64_t dataChunkOffset = 0;
-    uint64_t dataChunkSize = 0;
-    if (!FindDataChunk(std::wstring(wavPath), dataChunkOffset, dataChunkSize)) {
-        pRenderClient->Release();
-        CloseHandle(hEvent);
-        pAudioClient->Release();
-        pDevice->Release();
-        pEnumerator->Release();
-        CoUninitialize();
-        return core::Result<Player>::Err(
-            core::ErrorCode::AudioInitFailed,
-            "Could not find data chunk in WAV file");
+    // Find data chunk offset and size (WAV only; FLAC total frames come
+    // from STREAMINFO and decoding starts at the stream head).
+    uint32_t bytesPerFrame =
+        fileFormat.channelCount * (fileFormat.bitsPerSample / 8);
+    if (!isFlac) {
+        if (!FindDataChunk(std::wstring(wavPath), dataChunkOffset,
+                           dataChunkSize)) {
+            pRenderClient->Release();
+            CloseHandle(hEvent);
+            pAudioClient->Release();
+            pDevice->Release();
+            pEnumerator->Release();
+            CoUninitialize();
+            return core::Result<Player>::Err(
+                core::ErrorCode::AudioInitFailed,
+                "Could not find data chunk in WAV file");
+        }
+        totalFrames = static_cast<uint32_t>(dataChunkSize / bytesPerFrame);
     }
 
-    uint32_t bytesPerFrame = fileFormat.channelCount * (fileFormat.bitsPerSample / 8);
-    uint32_t totalFrames = static_cast<uint32_t>(dataChunkSize / bytesPerFrame);
-
-    Player player(std::wstring(wavPath), fileFormat, totalFrames);
+    Player player(std::wstring(wavPath), fileFormat, totalFrames, sourceKind,
+                  flacFormat);
     player.pEnumerator_ = pEnumerator;
     player.pDevice_ = pDevice;
     player.pAudioClient_ = pAudioClient;
@@ -391,6 +481,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
     player.bytesPerFrame_ = bytesPerFrame;
     player.dataChunkOffset_ = dataChunkOffset;
     player.dataChunkSize_ = dataChunkSize;
+    player.ownsCom_ = true;
 
     return core::Result<Player>::Ok(std::move(player));
 }
@@ -453,6 +544,24 @@ core::Status Player::Seek(uint32_t frameOffset) {
             "Cannot seek while stopped");
     }
 
+    if (sourceKind_ == SourceKind::Flac) {
+        frameOffset = std::min(frameOffset, totalFrames_);
+
+        // Pause, reposition, resume.
+        Pause();
+        currentFrame_ = frameOffset;
+        if (!flacReader_.Seek(frameOffset)) {
+            // Decoder was flushed back to a usable state; the stream stays
+            // paused so the caller can Resume() or Stop().
+            return core::Result<void>::Err(
+                core::ErrorCode::AudioInitFailed,
+                "FLAC seek failed");
+        }
+        Resume();
+
+        return core::Result<void>::Ok();
+    }
+
     frameOffset = std::min(frameOffset, totalFrames_);
 
     // Pause, reposition, resume.
@@ -465,16 +574,24 @@ core::Status Player::Seek(uint32_t frameOffset) {
 }
 
 core::Status Player::Stop() {
-    if (state_ == PlaybackState::Stopped) {
-        return core::Result<void>::Ok();
-    }
+    if (state_ != PlaybackState::Stopped) {
+        IAudioClient* pAc = reinterpret_cast<IAudioClient*>(pAudioClient_);
+        pAc->Stop();
 
-    IAudioClient* pAc = reinterpret_cast<IAudioClient*>(pAudioClient_);
-    pAc->Stop();
-
-    if (renderThread_.joinable()) {
+        if (renderThread_.joinable()) {
+            renderThread_.join();
+        }
+    } else if (renderThread_.joinable() &&
+               renderThread_.get_id() != std::this_thread::get_id()) {
+        // End-of-stream path: the render thread finished on its own and
+        // left a joinable handle behind.
         renderThread_.join();
     }
+
+    // Release everything held, whether playback ran or Create() only
+    // negotiated the device. A successful Create() without Play() leaves
+    // the exclusive stream initialized; releasing it here keeps Stop()
+    // idempotent and lets a later Create() re-acquire the device.
 
     if (pRenderClient_) {
         reinterpret_cast<IAudioRenderClient*>(pRenderClient_)->Release();
@@ -503,7 +620,12 @@ core::Status Player::Stop() {
         hFile_ = nullptr;
     }
 
-    CoUninitialize();
+    flacReader_.Close();
+
+    if (ownsCom_) {
+        CoUninitialize();
+        ownsCom_ = false;
+    }
 
     state_ = PlaybackState::Stopped;
     currentFrame_ = 0;
@@ -528,10 +650,18 @@ uint32_t Player::GetSampleRate() const noexcept {
 }
 
 void Player::RenderThreadEntry() {
-    OpenWavFile();
-    if (!hFile_) {
-        state_ = PlaybackState::Stopped;
-        return;
+    if (sourceKind_ == SourceKind::Flac) {
+        OpenFlacFile();
+        if (!flacReader_.IsOpen()) {
+            state_ = PlaybackState::Stopped;
+            return;
+        }
+    } else {
+        OpenWavFile();
+        if (!hFile_) {
+            state_ = PlaybackState::Stopped;
+            return;
+        }
     }
 
     // Fill the first buffer before starting.
@@ -569,9 +699,7 @@ void Player::RenderThreadEntry() {
 }
 
 Player::~Player() {
-    if (state_ != PlaybackState::Stopped) {
-        Stop();
-    }
+    Stop();
 }
 
 void Player::OpenWavFile() {
@@ -596,6 +724,12 @@ void Player::OpenWavFile() {
     LARGE_INTEGER filePos;
     filePos.QuadPart = static_cast<LONGLONG>(filePosition_);
     SetFilePointerEx(hFile_, filePos, nullptr, FILE_CURRENT);
+}
+
+void Player::OpenFlacFile() {
+    // Open failure is reported via IsOpen(), checked by RenderThreadEntry;
+    // there is no error channel back from the render thread.
+    flacReader_.Open(wavPath_, flacFormat_, currentFrame_);
 }
 
 uint32_t Player::ReadFrames(uint8_t* buffer, uint32_t maxFrames) {
@@ -634,11 +768,19 @@ bool Player::RenderIteration() {
     // Zero out buffer (silence for EOF).
     std::memset(pData, 0, bufferFrameCount_ * bytesPerFrame_);
 
-    // Read frames from WAV file.
-    uint32_t framesRead = ReadFrames(
-        pData,
-        std::min(bufferFrameCount_,
-                 totalFrames_ - currentFrame_));
+    // Read frames from the source: WAV file bytes or decoded FLAC samples.
+    uint32_t framesRead = 0;
+    if (sourceKind_ == SourceKind::Flac) {
+        framesRead = flacReader_.ReadFrames(
+            pData,
+            std::min(bufferFrameCount_,
+                     totalFrames_ - currentFrame_));
+    } else {
+        framesRead = ReadFrames(
+            pData,
+            std::min(bufferFrameCount_,
+                     totalFrames_ - currentFrame_));
+    }
 
     currentFrame_ += framesRead;
 
