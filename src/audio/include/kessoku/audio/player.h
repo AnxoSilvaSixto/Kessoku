@@ -4,7 +4,9 @@
 #include "kessoku/audio/flac_format.h"
 #include "kessoku/audio/wav_format.h"
 
+#include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -50,7 +52,7 @@ public:
           bytesPerFrame_(other.bytesPerFrame_),
           currentFrame_(other.currentFrame_),
           ownsCom_(other.ownsCom_),
-          state_(other.state_) {
+          state_(other.state_.load()) {
         other.pEnumerator_ = nullptr;
         other.pDevice_ = nullptr;
         other.pAudioClient_ = nullptr;
@@ -59,7 +61,7 @@ public:
         other.hFile_ = nullptr;
         other.currentFrame_ = 0;
         other.ownsCom_ = false;
-        other.state_ = PlaybackState::Stopped;
+        other.state_.store(PlaybackState::Stopped);
     }
 
     // Initialize the player for a specific audio file (.wav or .flac).
@@ -143,6 +145,8 @@ private:
     void* hFile_ = nullptr; // HANDLE to the WAV file
     uint64_t dataChunkOffset_ = 0;
     uint64_t dataChunkSize_ = 0;
+    // Byte offset into the data chunk; mirrors currentFrame_ for WAV.
+    // Guarded by positionMutex_ (see below).
     uint64_t filePosition_ = 0;
 
     WavFormat format_;
@@ -153,7 +157,16 @@ private:
     uint32_t bufferFrameCount_ = 0;
     uint32_t bytesPerFrame_ = 0;
 
-    // File read state (accessed only from render thread)
+    // Playback position, shared between the API thread (Play/Seek/Stop/
+    // GetPosition) and the render thread (Open*/RenderIteration/ReadFrames).
+    // Guarded by positionMutex_, which also serializes the WAV file handle
+    // reposition in Seek() against reads in ReadFrames(). FlacReader has
+    // its own internal lock for decoder state; lock order is always
+    // positionMutex_ -> FlacReader, never the reverse.
+    mutable std::mutex positionMutex_;
+    // File read state (guarded by positionMutex_, NOT render-thread-only:
+    // Seek() writes it from the API thread while RenderIteration() advances
+    // it on the render thread).
     uint32_t currentFrame_ = 0;
 
     // True while this instance owes CoUninitialize() for the apartment
@@ -161,7 +174,10 @@ private:
     // uninitialized exactly once per successful Create().
     bool ownsCom_ = false;
 
-    PlaybackState state_ = PlaybackState::Stopped;
+    // Read/written from both the API thread and the render thread without
+    // any higher-level lock, so atomic. Load/store only; transitions are
+    // independent (no read-modify-write), so no CAS loop is needed.
+    std::atomic<PlaybackState> state_ = PlaybackState::Stopped;
 };
 
 } // namespace kessoku::audio

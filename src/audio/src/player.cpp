@@ -528,21 +528,25 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
 }
 
 core::Status Player::Play() {
-    if (state_ != PlaybackState::Stopped && state_ != PlaybackState::Paused) {
+    if (state_.load() != PlaybackState::Stopped &&
+        state_.load() != PlaybackState::Paused) {
         return core::Result<void>::Err(
             core::ErrorCode::AudioInitFailed,
             "Player not in Stopped or Paused state");
     }
 
-    if (state_ == PlaybackState::Paused) {
+    if (state_.load() == PlaybackState::Paused) {
         // The render thread from the original Play() is still alive (and
         // joinable); resuming it has the same effect as Resume() without
         // move-assigning over a joinable std::thread (std::terminate).
         return Resume();
     }
 
-    currentFrame_ = 0;
-    filePosition_ = 0;
+    {
+        std::lock_guard<std::mutex> lock(positionMutex_);
+        currentFrame_ = 0;
+        filePosition_ = 0;
+    }
 
     if (renderThread_.joinable()) {
         // Natural end-of-stream leaves a finished-but-joinable thread
@@ -558,7 +562,7 @@ core::Status Player::Play() {
 }
 
 core::Status Player::Pause() {
-    if (state_ != PlaybackState::Playing) {
+    if (state_.load() != PlaybackState::Playing) {
         return core::Result<void>::Err(
             core::ErrorCode::AudioInitFailed,
             "Player not in Playing state");
@@ -572,7 +576,7 @@ core::Status Player::Pause() {
 }
 
 core::Status Player::Resume() {
-    if (state_ != PlaybackState::Paused) {
+    if (state_.load() != PlaybackState::Paused) {
         return core::Result<void>::Err(
             core::ErrorCode::AudioInitFailed,
             "Player not in Paused state");
@@ -591,7 +595,7 @@ core::Status Player::Resume() {
 }
 
 core::Status Player::Seek(uint32_t frameOffset) {
-    if (state_ == PlaybackState::Stopped) {
+    if (state_.load() == PlaybackState::Stopped) {
         return core::Result<void>::Err(
             core::ErrorCode::AudioInitFailed,
             "Cannot seek while stopped");
@@ -600,15 +604,22 @@ core::Status Player::Seek(uint32_t frameOffset) {
     if (sourceKind_ == SourceKind::Flac) {
         frameOffset = std::min(frameOffset, totalFrames_);
 
-        // Pause, reposition, resume.
+        // Pause, reposition, resume. The position update and decoder seek
+        // hold positionMutex_ so a concurrent RenderIteration (which holds
+        // the same mutex across its decode + currentFrame_ update) cannot
+        // interleave and clobber the seek with a stale read-modify-write.
+        // Lock order is always positionMutex_ -> FlacReader.
         Pause();
-        currentFrame_ = frameOffset;
-        if (!flacReader_.Seek(frameOffset)) {
-            // Decoder was flushed back to a usable state; the stream stays
-            // paused so the caller can Resume() or Stop().
-            return core::Result<void>::Err(
-                core::ErrorCode::AudioInitFailed,
-                "FLAC seek failed");
+        {
+            std::lock_guard<std::mutex> lock(positionMutex_);
+            currentFrame_ = frameOffset;
+            if (!flacReader_.Seek(frameOffset)) {
+                // Decoder was flushed back to a usable state; the stream
+                // stays paused so the caller can Resume() or Stop().
+                return core::Result<void>::Err(
+                    core::ErrorCode::AudioInitFailed,
+                    "FLAC seek failed");
+            }
         }
         Resume();
 
@@ -617,17 +628,28 @@ core::Status Player::Seek(uint32_t frameOffset) {
 
     frameOffset = std::min(frameOffset, totalFrames_);
 
-    // Pause, reposition, resume.
+    // Pause, reposition, resume (same serialization as FLAC above).
+    // Repositions the file handle as well: filePosition_ alone is not
+    // enough because ReadFrames reads sequentially from the handle.
     Pause();
-    currentFrame_ = frameOffset;
-    filePosition_ = static_cast<uint64_t>(frameOffset) * bytesPerFrame_;
+    {
+        std::lock_guard<std::mutex> lock(positionMutex_);
+        currentFrame_ = frameOffset;
+        filePosition_ = static_cast<uint64_t>(frameOffset) * bytesPerFrame_;
+        if (hFile_) {
+            LARGE_INTEGER pos;
+            pos.QuadPart = static_cast<LONGLONG>(dataChunkOffset_ +
+                                                 filePosition_);
+            SetFilePointerEx(hFile_, pos, nullptr, FILE_BEGIN);
+        }
+    }
     Resume();
 
     return core::Result<void>::Ok();
 }
 
 core::Status Player::Stop() {
-    if (state_ != PlaybackState::Stopped) {
+    if (state_.load() != PlaybackState::Stopped) {
         IAudioClient* pAc = reinterpret_cast<IAudioClient*>(pAudioClient_);
         pAc->Stop();
 
@@ -681,16 +703,20 @@ core::Status Player::Stop() {
     }
 
     state_ = PlaybackState::Stopped;
-    currentFrame_ = 0;
-    filePosition_ = 0;
+    {
+        std::lock_guard<std::mutex> lock(positionMutex_);
+        currentFrame_ = 0;
+        filePosition_ = 0;
+    }
     return core::Result<void>::Ok();
 }
 
 PlaybackState Player::GetState() const noexcept {
-    return state_;
+    return state_.load();
 }
 
 uint32_t Player::GetPosition() const noexcept {
+    std::lock_guard<std::mutex> lock(positionMutex_);
     return currentFrame_;
 }
 
@@ -711,9 +737,12 @@ void Player::RenderThreadEntry() {
         }
     } else {
         OpenWavFile();
-        if (!hFile_) {
-            state_ = PlaybackState::Stopped;
-            return;
+        {
+            std::lock_guard<std::mutex> lock(positionMutex_);
+            if (!hFile_) {
+                state_ = PlaybackState::Stopped;
+                return;
+            }
         }
     }
 
@@ -727,7 +756,7 @@ void Player::RenderThreadEntry() {
         return;
     }
 
-    while (state_ == PlaybackState::Playing) {
+    while (state_.load() == PlaybackState::Playing) {
         DWORD waitResult = WaitForSingleObject(
             reinterpret_cast<HANDLE>(hEvent_), 2000);
 
@@ -756,18 +785,24 @@ Player::~Player() {
 }
 
 void Player::OpenWavFile() {
+    // Holds positionMutex_ across handle creation + seek so a concurrent
+    // Seek() (same mutex) cannot reposition a half-opened handle or miss
+    // the new filePosition_.
+    std::lock_guard<std::mutex> lock(positionMutex_);
     if (hFile_) {
         CloseHandle(hFile_);
+        hFile_ = nullptr;
     }
 
-    hFile_ = CreateFileW(
+    void* newFile = CreateFileW(
         wavPath_.c_str(), GENERIC_READ, FILE_SHARE_READ,
         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 
-    if (hFile_ == INVALID_HANDLE_VALUE) {
+    if (newFile == INVALID_HANDLE_VALUE) {
         hFile_ = nullptr;
         return;
     }
+    hFile_ = newFile;
 
     // Seek to data chunk start + filePosition_
     LARGE_INTEGER dataStart;
@@ -782,10 +817,17 @@ void Player::OpenWavFile() {
 void Player::OpenFlacFile() {
     // Open failure is reported via IsOpen(), checked by RenderThreadEntry;
     // there is no error channel back from the render thread.
+    // Reads currentFrame_ under lock; holds the lock across Open so a
+    // concurrent Seek() serializes after the open instead of seeking a
+    // decoder that is about to be replaced.
+    std::lock_guard<std::mutex> lock(positionMutex_);
     flacReader_.Open(wavPath_, flacFormat_, currentFrame_);
 }
 
 uint32_t Player::ReadFrames(uint8_t* buffer, uint32_t maxFrames) {
+    // Caller (RenderIteration) holds positionMutex_. Must not lock here:
+    // the same non-recursive mutex is already held. Serializes the
+    // ReadFile + filePosition_ advance against Seek()'s reposition.
     if (!hFile_ || bytesPerFrame_ == 0) return 0;
 
     uint64_t remaining = dataChunkSize_ - filePosition_;
@@ -822,20 +864,26 @@ bool Player::RenderIteration() {
     std::memset(pData, 0, bufferFrameCount_ * bytesPerFrame_);
 
     // Read frames from the source: WAV file bytes or decoded FLAC samples.
+    // The remaining-count computation, decode, and currentFrame_ advance
+    // hold positionMutex_ as one critical section so Seek() cannot slip a
+    // store between the read and the += and lose either update.
     uint32_t framesRead = 0;
-    if (sourceKind_ == SourceKind::Flac) {
-        framesRead = flacReader_.ReadFrames(
-            pData,
-            std::min(bufferFrameCount_,
-                     totalFrames_ - currentFrame_));
-    } else {
-        framesRead = ReadFrames(
-            pData,
-            std::min(bufferFrameCount_,
-                     totalFrames_ - currentFrame_));
-    }
+    bool more = false;
+    {
+        std::lock_guard<std::mutex> lock(positionMutex_);
+        uint32_t remaining = (currentFrame_ < totalFrames_)
+                                 ? (totalFrames_ - currentFrame_)
+                                 : 0;
+        uint32_t toRead = std::min(bufferFrameCount_, remaining);
+        if (sourceKind_ == SourceKind::Flac) {
+            framesRead = flacReader_.ReadFrames(pData, toRead);
+        } else {
+            framesRead = ReadFrames(pData, toRead);
+        }
 
-    currentFrame_ += framesRead;
+        currentFrame_ += framesRead;
+        more = (currentFrame_ < totalFrames_);
+    }
 
     DWORD flags = 0;
     if (framesRead == 0) {
@@ -850,7 +898,7 @@ bool Player::RenderIteration() {
         return false;
     }
 
-    return (currentFrame_ < totalFrames_);
+    return more;
 }
 
 void Player::HandleDeviceLost() {
