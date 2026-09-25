@@ -170,6 +170,12 @@ private:
     // Seek() writes it from the API thread while RenderIteration() advances
     // it on the render thread).
     uint32_t currentFrame_ = 0;
+    // Set to true when ReadFrames() (WAV) encounters a read failure or when
+    // flacReader_.HadError() is true (checked in RenderIteration). Guards
+    // against treating a mid-stream decode/read error as "more data coming"
+    // and spinning forever writing silence. Render-thread-only; guarded by
+    // positionMutex_ for consistency with the other fields in this block.
+    bool audioError_ = false;
 
     // True while this instance owes CoUninitialize() for the apartment
     // entered during Create(). Guards Stop() idempotency: COM must be

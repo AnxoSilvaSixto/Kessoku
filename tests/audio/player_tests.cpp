@@ -1004,6 +1004,173 @@ int main() {
         }
     }
 
+    // --- Test 20: Mid-stream FLAC decode error stops playback (hang fix) ---
+    // A FLAC file with a corrupted frame mid-stream: the decoder hits bad
+    // frame sync / CRC, sets error_, and ReadFrames returns 0. Without the
+    // fix, currentFrame_ never advances and the render loop spins forever
+    // writing silence. With the fix, HadError() is checked and playback
+    // stops like natural EOS.
+    {
+        std::wstring flacPath = CreateTempFlac(
+            L"\\kessoku_test_player20_", 44100, 16, 2, 10000);
+        CHECK(!flacPath.empty(), "Create temp FLAC for decode-error test");
+
+        if (!flacPath.empty()) {
+            // Corrupt a frame in the middle of the file.
+            // FLAC frame data starts after the metadata blocks. We corrupt
+            // bytes around the middle of the file to trigger a decode error
+            // after several good frames have been decoded.
+            HANDLE hCorrupt = CreateFileW(
+                flacPath.data(), GENERIC_READ | GENERIC_WRITE, 0,
+                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (hCorrupt != INVALID_HANDLE_VALUE) {
+                LARGE_INTEGER fileEnd;
+                GetFileSizeEx(hCorrupt, &fileEnd);
+                // Seek to roughly 60% into the file (past STREAMINFO + first
+                // few frames, into the middle of frame data).
+                LARGE_INTEGER seekPos;
+                seekPos.QuadPart = fileEnd.QuadPart * 3 / 5;
+                SetFilePointerEx(hCorrupt, seekPos, nullptr, FILE_BEGIN);
+                // Overwrite 4 bytes with invalid frame sync pattern (0xFF 0xFB
+                // is a sync pattern that won't match valid FLAC framing).
+                unsigned char badBytes[] = { 0xFF, 0xFB, 0x00, 0x00 };
+                DWORD written = 0;
+                WriteFile(hCorrupt, badBytes, sizeof(badBytes), &written, nullptr);
+                CloseHandle(hCorrupt);
+            }
+
+            auto result = kessoku::audio::Player::Create(flacPath);
+            CHECK(result.IsOk(), "Player::Create for decode-error test");
+
+            if (result.IsOk()) {
+                auto player = std::move(result.Value());
+
+                CHECK(player.Play().IsOk(), "Play() succeeds for corrupted FLAC");
+
+                // Poll with a bounded deadline. Without the fix, this hangs
+                // forever (test binary never exits). With the fix, the player
+                // stops within a second or two.
+                bool stopped = false;
+                for (int i = 0; i < 40; ++i) {
+                    if (player.GetState() ==
+                        kessoku::audio::PlaybackState::Stopped) {
+                        stopped = true;
+                        break;
+                    }
+                    Sleep(250);
+                }
+                CHECK(stopped,
+                      "Corrupted FLAC stops within deadline (not hang)");
+
+                player.Stop();
+            }
+
+            CleanupTempFlac(flacPath);
+        }
+    }
+
+    // --- Test 21: Truncated WAV file stops playback (hang fix) ---
+    // A WAV file whose data-chunk header declares more samples than are
+    // actually present in the file. When the declared size exceeds what's
+    // readable, the render loop would spin forever writing silence without
+    // the fix. With the fix, the read failure is detected and playback
+    // stops like natural EOS.
+    {
+        // Create a WAV with header declaring 441000 frames (10s) but only
+        // write 4410 frames (0.1s) of actual data. The file is truncated.
+        wchar_t buf[MAX_PATH]{};
+        DWORD len = GetTempPathW(MAX_PATH, buf);
+        std::wstring tempDir;
+        if (len > 0 && len <= MAX_PATH) {
+            tempDir = std::wstring(buf) + L"\\kessoku_test_player21_";
+            if (!CreateDirectoryW(tempDir.c_str(), nullptr) &&
+                GetLastError() != ERROR_ALREADY_EXISTS) {
+                tempDir.clear();
+            }
+        }
+        std::wstring wavPath;
+        if (!tempDir.empty()) {
+            wavPath = tempDir + L"\\test.wav";
+
+            HANDLE hFile = CreateFileW(
+                wavPath.data(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (hFile != INVALID_HANDLE_VALUE) {
+                uint32_t bytesPerFrame = 2 * 2; // 16-bit, 2ch
+                uint32_t declaredDataSize = 441000 * bytesPerFrame; // 10s
+                uint32_t chunkSize = 36 + declaredDataSize;
+
+                char riffHeader[] = "RIFF";
+                DWORD chunkSizeBytes = chunkSize;
+                char waveHeader[] = "WAVE";
+                WriteFile(hFile, riffHeader, 4, nullptr, nullptr);
+                WriteFile(hFile, &chunkSizeBytes, 4, nullptr, nullptr);
+                WriteFile(hFile, waveHeader, 4, nullptr, nullptr);
+
+                char fmtId[] = "fmt ";
+                uint32_t fmtSize = 16;
+                uint16_t audioFormat = 1;
+                WriteFile(hFile, fmtId, 4, nullptr, nullptr);
+                WriteFile(hFile, &fmtSize, 4, nullptr, nullptr);
+                WriteFile(hFile, &audioFormat, 2, nullptr, nullptr);
+                uint16_t channels = 2;
+                WriteFile(hFile, &channels, 2, nullptr, nullptr);
+                uint32_t sampleRate = 44100;
+                WriteFile(hFile, &sampleRate, 4, nullptr, nullptr);
+                uint32_t byteRate = sampleRate * bytesPerFrame;
+                WriteFile(hFile, &byteRate, 4, nullptr, nullptr);
+                uint16_t blockAlign = 4;
+                WriteFile(hFile, &blockAlign, 2, nullptr, nullptr);
+                uint16_t bitsPerSample = 16;
+                WriteFile(hFile, &bitsPerSample, 2, nullptr, nullptr);
+
+                char dataId[] = "data";
+                WriteFile(hFile, dataId, 4, nullptr, nullptr);
+                WriteFile(hFile, &declaredDataSize, 4, nullptr, nullptr);
+
+                // Only write 0.1s of actual data (4410 frames)
+                std::vector<uint8_t> silence(bytesPerFrame, 0);
+                for (uint32_t i = 0; i < 4410; ++i) {
+                    WriteFile(hFile, silence.data(), bytesPerFrame, nullptr, nullptr);
+                }
+
+                CloseHandle(hFile);
+            }
+        }
+        CHECK(!wavPath.empty(), "Create truncated WAV for read-error test");
+
+        if (!wavPath.empty()) {
+            auto result = kessoku::audio::Player::Create(wavPath);
+            CHECK(result.IsOk(), "Player::Create for truncated WAV test");
+
+            if (result.IsOk()) {
+                auto player = std::move(result.Value());
+
+                CHECK(player.Play().IsOk(), "Play() succeeds for truncated WAV");
+
+                // Poll with a bounded deadline. Without the fix, this hangs
+                // forever. With the fix, playback stops within a few seconds.
+                bool stopped = false;
+                for (int i = 0; i < 40; ++i) {
+                    if (player.GetState() ==
+                        kessoku::audio::PlaybackState::Stopped) {
+                        stopped = true;
+                        break;
+                    }
+                    Sleep(250);
+                }
+                CHECK(stopped,
+                      "Truncated WAV stops within deadline (not hang)");
+
+                player.Stop();
+            }
+
+            DeleteFileW(wavPath.data());
+            std::wstring dir = tempDir;
+            RemoveDirectoryW(dir.c_str());
+        }
+    }
+
     std::wprintf(L"\n=== Results: %d failures ===\n", gFailures);
     return gFailures;
 }

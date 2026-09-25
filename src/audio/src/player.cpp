@@ -960,9 +960,11 @@ void Player::OpenWavFile() {
 
     if (newFile == INVALID_HANDLE_VALUE) {
         hFile_ = nullptr;
+        audioError_ = false;
         return;
     }
     hFile_ = newFile;
+    audioError_ = false;
 
     // Seek to data chunk start + filePosition_
     LARGE_INTEGER dataStart;
@@ -982,6 +984,7 @@ void Player::OpenFlacFile() {
     // decoder that is about to be replaced.
     std::lock_guard<std::mutex> lock(positionMutex_);
     flacReader_.Open(wavPath_, flacFormat_, currentFrame_);
+    audioError_ = false;
 }
 
 uint32_t Player::ReadFrames(uint8_t* buffer, uint32_t maxFrames) {
@@ -1000,6 +1003,7 @@ uint32_t Player::ReadFrames(uint8_t* buffer, uint32_t maxFrames) {
 
     DWORD bytesRead = 0;
     if (!ReadFile(hFile_, buffer, framesToRead * bytesPerFrame_, &bytesRead, nullptr)) {
+        audioError_ = true;
         return 0;
     }
 
@@ -1043,6 +1047,18 @@ bool Player::RenderIteration() {
 
         currentFrame_ += framesRead;
         more = (currentFrame_ < totalFrames_);
+
+        // Distinguish "stream ended" from "decode/read error": when
+        // ReadFrames returns 0 and an error flag is set, currentFrame_
+        // has not advanced, so the natural more = (currentFrame_ <
+        // totalFrames_) would still be true and the render loop would
+        // spin forever writing silence. Treat a flagged error the same
+        // way as natural end-of-stream so the loop exits cleanly.
+        if (framesRead == 0 &&
+            (sourceKind_ == SourceKind::Flac ? flacReader_.HadError()
+                                             : audioError_)) {
+            more = false;
+        }
     }
 
     DWORD flags = 0;
