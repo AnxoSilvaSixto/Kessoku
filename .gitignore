@@ -1,5 +1,6 @@
 # Build output
 build/
+build-asan/
 out/
 
 # vcpkg build artifacts -- regenerated from vcpkg.json via `vcpkg install`
@@ -9,6 +10,12 @@ vcpkg_installed/
 .vs/
 *.user
 CMakeUserPresets.json
+
+# Local test / diagnostic fallout -- regenerated, never track
+Testing/
+/*.dll
+/*.obj
+/diag_*.txt
 
 # OS cruft
 Thumbs.db
