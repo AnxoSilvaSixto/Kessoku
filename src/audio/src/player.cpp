@@ -586,14 +586,22 @@ core::Status Player::Play() {
     // with the start of the new thread, so the thread can only ever observe
     // Playing (or a later transition) — never the stale Stopped that would
     // make it break immediately and leave Playing with a dead thread. A
-    // throwing constructor restores Stopped so no Playing-with-no-thread
-    // state escapes. The join-before-reassign logic above is unchanged.
+    // throwing constructor restores Stopped and reports Err through the
+    // normal Result channel so no exception escapes Play(). The
+    // join-before-reassign logic above is unchanged.
     state_ = PlaybackState::Playing;
     try {
         renderThread_ = std::thread(&Player::RenderThreadEntry, this);
+    } catch (const std::exception& ex) {
+        state_ = PlaybackState::Stopped;
+        return core::Result<void>::Err(
+            core::ErrorCode::AudioInitFailed,
+            std::string("Could not start render thread: ") + ex.what());
     } catch (...) {
         state_ = PlaybackState::Stopped;
-        throw;
+        return core::Result<void>::Err(
+            core::ErrorCode::AudioInitFailed,
+            "Could not start render thread");
     }
     return core::Result<void>::Ok();
 }
