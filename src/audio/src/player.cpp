@@ -50,28 +50,54 @@ WAVEFORMATEXTENSIBLE BuildWavExtensible(const kessoku::audio::WavFormat& fmt) {
 
     wfx.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
 
-    switch (fmt.bitsPerSample) {
-        case 8:
+    // Channel mask follows the FLAC standard channel ordering (RFC 9639
+    // section 9.1.3), which maps 1:1 onto WAVEFORMATEXTENSIBLE speaker
+    // positions. The mask selects speaker assignment only; samples pass
+    // through untouched. Bit count always equals nChannels, as required
+    // by Microsoft's WAVEFORMATEXTENSIBLE docs (drivers reject mismatches).
+    switch (fmt.channelCount) {
+        case 1:
             wfx.dwChannelMask = KSAUDIO_SPEAKER_MONO;
             break;
-        case 16:
-        case 24:
-        case 32:
-            if (fmt.channelCount == 1)
-                wfx.dwChannelMask = KSAUDIO_SPEAKER_MONO;
-            else if (fmt.channelCount == 2)
-                wfx.dwChannelMask = KSAUDIO_SPEAKER_STEREO;
-            else if (fmt.channelCount == 4)
-                wfx.dwChannelMask = KSAUDIO_SPEAKER_QUAD;
-            else if (fmt.channelCount == 6)
-                wfx.dwChannelMask = KSAUDIO_SPEAKER_5POINT1;
-            else if (fmt.channelCount == 8)
-                wfx.dwChannelMask = KSAUDIO_SPEAKER_7POINT1;
-            else
-                wfx.dwChannelMask = KSAUDIO_SPEAKER_STEREO;
+        case 2:
+            wfx.dwChannelMask = KSAUDIO_SPEAKER_STEREO;
+            break;
+        case 3:
+            // L, R, C.
+            wfx.dwChannelMask = KSAUDIO_SPEAKER_3POINT0;
+            break;
+        case 4:
+            wfx.dwChannelMask = KSAUDIO_SPEAKER_QUAD;
+            break;
+        case 5:
+            // FL, FR, FC, BL, BR. No KSAUDIO_SPEAKER_* constant matches
+            // the FLAC 5-channel order (5POINT0 uses side instead of back),
+            // so spell out the speaker bits explicitly.
+            wfx.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT |
+                                SPEAKER_FRONT_CENTER | SPEAKER_BACK_LEFT |
+                                SPEAKER_BACK_RIGHT;
+            break;
+        case 6:
+            wfx.dwChannelMask = KSAUDIO_SPEAKER_5POINT1;
+            break;
+        case 7:
+            // FL, FR, FC, LFE, BC, SL, SR. No standard constant matches.
+            wfx.dwChannelMask = SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT |
+                                SPEAKER_FRONT_CENTER | SPEAKER_LOW_FREQUENCY |
+                                SPEAKER_BACK_CENTER | SPEAKER_SIDE_LEFT |
+                                SPEAKER_SIDE_RIGHT;
+            break;
+        case 8:
+            // FL, FR, FC, LFE, BL, BR, SL, SR. This is 7POINT1_SURROUND
+            // (0x63F), not 7POINT1 (0xFF, wide with FLC/FRC).
+            wfx.dwChannelMask = KSAUDIO_SPEAKER_7POINT1_SURROUND;
             break;
         default:
-            wfx.dwChannelMask = KSAUDIO_SPEAKER_STEREO;
+            // Unreachable: Create() rejects channel counts outside 1-8
+            // before this runs. Zero (DIRECTOUT) keeps the format invalid
+            // so device negotiation fails cleanly instead of mislabeling
+            // channels with a stereo mask.
+            wfx.dwChannelMask = KSAUDIO_SPEAKER_DIRECTOUT;
             break;
     }
 
@@ -493,9 +519,21 @@ core::Status Player::Play() {
             "Player not in Stopped or Paused state");
     }
 
-    if (state_ == PlaybackState::Stopped) {
-        currentFrame_ = 0;
-        filePosition_ = 0;
+    if (state_ == PlaybackState::Paused) {
+        // The render thread from the original Play() is still alive (and
+        // joinable); resuming it has the same effect as Resume() without
+        // move-assigning over a joinable std::thread (std::terminate).
+        return Resume();
+    }
+
+    currentFrame_ = 0;
+    filePosition_ = 0;
+
+    if (renderThread_.joinable()) {
+        // Natural end-of-stream leaves a finished-but-joinable thread
+        // behind with no Stop() in between. Join it before spawning the
+        // replacement; move-assigning over a joinable thread terminates.
+        renderThread_.join();
     }
 
     renderThread_ = std::thread(&Player::RenderThreadEntry, this);

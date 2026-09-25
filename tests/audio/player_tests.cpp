@@ -866,6 +866,87 @@ int main() {
         }
     }
 
+    // --- Test 17: Play() after natural end-of-stream without Stop() ---
+    // Regression: the finished render thread stays joinable, so a second
+    // Play() must join it before spawning a replacement instead of
+    // move-assigning over it (std::terminate).
+    {
+        // 0.1s fixture finishes quickly; polling avoids a racy fixed Sleep.
+        std::wstring wavPath = CreateTempWav(
+            L"\\kessoku_test_player17_", 44100, 16, 2, 4410);
+        CHECK(!wavPath.empty(), "Create temp WAV for replay test");
+
+        if (!wavPath.empty()) {
+            auto result = kessoku::audio::Player::Create(wavPath);
+            CHECK(result.IsOk(), "Player::Create for replay test");
+
+            if (result.IsOk()) {
+                auto player = std::move(result.Value());
+
+                CHECK(player.Play().IsOk(), "First Play() succeeds");
+
+                bool finished = false;
+                for (int i = 0; i < 100; ++i) {
+                    if (player.GetState() ==
+                        kessoku::audio::PlaybackState::Stopped) {
+                        finished = true;
+                        break;
+                    }
+                    Sleep(50);
+                }
+                CHECK(finished, "Track finishes naturally to Stopped");
+
+                auto second = player.Play();
+                CHECK(second.IsOk(),
+                      "Second Play() after EOS succeeds (no terminate)");
+                CHECK(player.GetState() ==
+                          kessoku::audio::PlaybackState::Playing,
+                      "State is Playing after replay");
+
+                player.Stop();
+            }
+
+            CleanupTempWav(wavPath);
+        }
+    }
+
+    // --- Test 18: Play() while Paused resumes without spawning ---
+    // Regression: renderThread_ is joinable for the whole Paused interval,
+    // so Play() must resume the existing thread (like Resume()) instead of
+    // move-assigning a new one over it (std::terminate).
+    {
+        std::wstring wavPath = CreateTempWav(
+            L"\\kessoku_test_player18_", 44100, 16, 2, 44100);
+        CHECK(!wavPath.empty(), "Create temp WAV for paused-replay test");
+
+        if (!wavPath.empty()) {
+            auto result = kessoku::audio::Player::Create(wavPath);
+            CHECK(result.IsOk(), "Player::Create for paused-replay test");
+
+            if (result.IsOk()) {
+                auto player = std::move(result.Value());
+
+                CHECK(player.Play().IsOk(), "Play() succeeds");
+                Sleep(100);
+                CHECK(player.Pause().IsOk(), "Pause() succeeds");
+                CHECK(player.GetState() ==
+                          kessoku::audio::PlaybackState::Paused,
+                      "State is Paused before second Play()");
+
+                auto second = player.Play();
+                CHECK(second.IsOk(),
+                      "Play() while Paused succeeds (no terminate)");
+                CHECK(player.GetState() ==
+                          kessoku::audio::PlaybackState::Playing,
+                      "State is Playing after Play() while Paused");
+
+                player.Stop();
+            }
+
+            CleanupTempWav(wavPath);
+        }
+    }
+
     std::wprintf(L"\n=== Results: %d failures ===\n", gFailures);
     return gFailures;
 }
