@@ -244,6 +244,21 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
                 core::ErrorCode::AudioInitFailed,
                 "WAV format parse failed: " + parseError);
         }
+        // Same exact-container rule as FLAC: anything outside 8/16/24/32
+        // would need bit-depth conversion, which bit-perfect forbids.
+        if (fileFormat.bitsPerSample != 8 &&
+            fileFormat.bitsPerSample != 16 &&
+            fileFormat.bitsPerSample != 24 &&
+            fileFormat.bitsPerSample != 32) {
+            return core::Result<Player>::Err(
+                core::ErrorCode::FormatNotSupported,
+                "WAV bit depth has no exact exclusive-mode PCM container");
+        }
+        if (fileFormat.channelCount == 0 || fileFormat.channelCount > 8) {
+            return core::Result<Player>::Err(
+                core::ErrorCode::FormatNotSupported,
+                "WAV channel count not supported in exclusive mode");
+        }
     }
 
     HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
