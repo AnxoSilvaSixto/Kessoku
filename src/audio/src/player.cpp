@@ -10,8 +10,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cstring>
 #include <cwctype>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -195,6 +197,15 @@ bool HasFlacExtension(std::wstring_view path) {
 } // namespace
 
 namespace kessoku::audio {
+
+void Player::AssertCallingThread() const noexcept {
+    if (ownerThreadId_ == 0) {
+        return;
+    }
+    assert(ownerThreadId_ == ::GetCurrentThreadId() &&
+           "Player public API must be called from the thread that called "
+           "Create()");
+}
 
 core::Result<Player> Player::Create(std::wstring_view wavPath) {
     const bool isFlac = HasFlacExtension(wavPath);
@@ -536,11 +547,13 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
     player.dataChunkOffset_ = dataChunkOffset;
     player.dataChunkSize_ = dataChunkSize;
     player.ownsCom_ = true;
+    player.ownerThreadId_ = static_cast<uint32_t>(::GetCurrentThreadId());
 
     return core::Result<Player>::Ok(std::move(player));
 }
 
 core::Status Player::Play() {
+    AssertCallingThread();
     if (state_.load() != PlaybackState::Stopped &&
         state_.load() != PlaybackState::Paused) {
         return core::Result<void>::Err(
@@ -586,6 +599,7 @@ core::Status Player::Play() {
 }
 
 core::Status Player::Pause() {
+    AssertCallingThread();
     if (state_.load() != PlaybackState::Playing) {
         return core::Result<void>::Err(
             core::ErrorCode::AudioInitFailed,
@@ -600,6 +614,7 @@ core::Status Player::Pause() {
 }
 
 core::Status Player::Resume() {
+    AssertCallingThread();
     if (state_.load() != PlaybackState::Paused) {
         return core::Result<void>::Err(
             core::ErrorCode::AudioInitFailed,
@@ -628,6 +643,7 @@ core::Status Player::Resume() {
 }
 
 core::Status Player::Seek(uint32_t frameOffset) {
+    AssertCallingThread();
     if (state_.load() == PlaybackState::Stopped) {
         return core::Result<void>::Err(
             core::ErrorCode::AudioInitFailed,
@@ -682,6 +698,7 @@ core::Status Player::Seek(uint32_t frameOffset) {
 }
 
 core::Status Player::Stop() {
+    AssertCallingThread();
     if (state_.load() != PlaybackState::Stopped) {
         IAudioClient* pAc = reinterpret_cast<IAudioClient*>(pAudioClient_);
         pAc->Stop();
@@ -762,19 +779,23 @@ core::Status Player::Stop() {
 }
 
 PlaybackState Player::GetState() const noexcept {
+    AssertCallingThread();
     return state_.load();
 }
 
 uint32_t Player::GetPosition() const noexcept {
+    AssertCallingThread();
     std::lock_guard<std::mutex> lock(positionMutex_);
     return currentFrame_;
 }
 
 uint32_t Player::GetTotalFrames() const noexcept {
+    AssertCallingThread();
     return totalFrames_;
 }
 
 uint32_t Player::GetSampleRate() const noexcept {
+    AssertCallingThread();
     return format_.sampleRate;
 }
 
@@ -911,6 +932,7 @@ void Player::RenderThreadEntry() {
 }
 
 Player::~Player() {
+    AssertCallingThread();
     Stop();
 }
 
