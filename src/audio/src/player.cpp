@@ -568,15 +568,20 @@ core::Status Player::Play() {
         renderThread_.join();
     }
 
-    // Publish Playing before the new thread can observe state: the thread
-    // entry opens the file first (milliseconds), but without ordering a
-    // thread that ran first would see Stopped, break immediately, and leave
-    // Playing with a dead thread. Construct into a local first so a throwing
-    // constructor cannot leave Playing with no thread behind it. The
-    // join-before-reassign logic above is unchanged.
-    std::thread newThread(&Player::RenderThreadEntry, this);
+    // Publish Playing before the new thread can observe state: the store is
+    // sequenced before thread construction, and construction synchronizes
+    // with the start of the new thread, so the thread can only ever observe
+    // Playing (or a later transition) — never the stale Stopped that would
+    // make it break immediately and leave Playing with a dead thread. A
+    // throwing constructor restores Stopped so no Playing-with-no-thread
+    // state escapes. The join-before-reassign logic above is unchanged.
     state_ = PlaybackState::Playing;
-    renderThread_ = std::move(newThread);
+    try {
+        renderThread_ = std::thread(&Player::RenderThreadEntry, this);
+    } catch (...) {
+        state_ = PlaybackState::Stopped;
+        throw;
+    }
     return core::Result<void>::Ok();
 }
 
