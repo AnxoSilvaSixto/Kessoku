@@ -947,6 +947,63 @@ int main() {
         }
     }
 
+    // --- Test 19: Pause past the 2s buffer-event timeout still resumes ---
+    // Regression: the render thread's WaitForSingleObject(hEvent_, 2000)
+    // timeout fired on any Pause() held >= 2s (Pause stops the client, so
+    // the event never re-signals), declared DeviceLost, and the thread exit
+    // unconditionally stored Stopped. Resume() then failed and Play()
+    // restarted from frame 0. A 10s fixture guarantees no natural EOS
+    // during the 3s paused hold.
+    {
+        std::wstring wavPath = CreateTempWav(
+            L"\\kessoku_test_player19_", 44100, 16, 2, 441000);
+        CHECK(!wavPath.empty(), "Create temp WAV for long-pause test");
+
+        if (!wavPath.empty()) {
+            auto result = kessoku::audio::Player::Create(wavPath);
+            CHECK(result.IsOk(), "Player::Create for long-pause test");
+
+            if (result.IsOk()) {
+                auto player = std::move(result.Value());
+
+                CHECK(player.Play().IsOk(), "Play() succeeds");
+                Sleep(200);
+                CHECK(player.GetState() ==
+                          kessoku::audio::PlaybackState::Playing,
+                      "State is Playing before pause");
+
+                CHECK(player.Pause().IsOk(), "Pause() succeeds");
+                CHECK(player.GetState() ==
+                          kessoku::audio::PlaybackState::Paused,
+                      "State is Paused immediately after Pause()");
+                const uint32_t pausedPos = player.GetPosition();
+
+                Sleep(3000);
+
+                CHECK(player.GetState() ==
+                          kessoku::audio::PlaybackState::Paused,
+                      "State is still Paused after 3s (no false DeviceLost/Stopped)");
+                CHECK(player.GetPosition() == pausedPos,
+                      "Position unchanged across 3s pause");
+
+                auto resumeStatus = player.Resume();
+                CHECK(resumeStatus.IsOk(),
+                      "Resume() succeeds after 3s pause");
+                CHECK(player.GetState() ==
+                          kessoku::audio::PlaybackState::Playing,
+                      "State is Playing after Resume()");
+                CHECK(player.GetPosition() >= pausedPos,
+                      "Resume continues from paused position (no restart)");
+                CHECK(player.GetPosition() != 0 || pausedPos == 0,
+                      "Resume did not restart from frame 0");
+
+                player.Stop();
+            }
+
+            CleanupTempWav(wavPath);
+        }
+    }
+
     std::wprintf(L"\n=== Results: %d failures ===\n", gFailures);
     return gFailures;
 }

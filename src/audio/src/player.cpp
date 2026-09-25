@@ -37,6 +37,19 @@ kessoku::core::ErrorCode HResultToErrorCode(HRESULT hr) {
     }
 }
 
+// True when an HRESULT means the endpoint is gone for good (unplugged,
+// reconfigured, disabled, removed) or its service died. Both must land the
+// player in DeviceLost, distinct from a clean Stopped exit. Sourced from
+// Microsoft Learn "Recovering from an Invalid-Device Error" (INVALIDATED)
+// and the IAudioClient::GetCurrentPadding remarks (SERVICE_NOT_RUNNING);
+// RenderIteration already mapped INVALIDATED, this extends the same treatment
+// to the service-death code on every IAudioClient call site that can report
+// it, so a dead service cannot decay into Stopped or spin forever.
+bool IsDeviceGone(HRESULT hr) {
+    return hr == AUDCLNT_E_DEVICE_INVALIDATED ||
+           hr == AUDCLNT_E_SERVICE_NOT_RUNNING;
+}
+
 WAVEFORMATEXTENSIBLE BuildWavExtensible(const kessoku::audio::WavFormat& fmt) {
     WAVEFORMATEXTENSIBLE wfx{};
     wfx.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
@@ -555,9 +568,15 @@ core::Status Player::Play() {
         renderThread_.join();
     }
 
-    renderThread_ = std::thread(&Player::RenderThreadEntry, this);
-
+    // Publish Playing before the new thread can observe state: the thread
+    // entry opens the file first (milliseconds), but without ordering a
+    // thread that ran first would see Stopped, break immediately, and leave
+    // Playing with a dead thread. Construct into a local first so a throwing
+    // constructor cannot leave Playing with no thread behind it. The
+    // join-before-reassign logic above is unchanged.
+    std::thread newThread(&Player::RenderThreadEntry, this);
     state_ = PlaybackState::Playing;
+    renderThread_ = std::move(newThread);
     return core::Result<void>::Ok();
 }
 
@@ -585,12 +604,21 @@ core::Status Player::Resume() {
     IAudioClient* pAc = reinterpret_cast<IAudioClient*>(pAudioClient_);
     HRESULT hr = pAc->Start();
     if (FAILED(hr)) {
+        if (IsDeviceGone(hr)) {
+            HandleDeviceLost();
+        }
         return core::Result<void>::Err(
             HResultToErrorCode(hr),
             "IAudioClient::Start failed");
     }
 
     state_ = PlaybackState::Playing;
+    // Wake the render thread promptly: while Paused it polls hEvent_ with
+    // a short timeout, and Start() alone only signals on the next buffer
+    // period. Auto-reset event; harmless if the thread is not waiting.
+    if (hEvent_) {
+        SetEvent(reinterpret_cast<HANDLE>(hEvent_));
+    }
     return core::Result<void>::Ok();
 }
 
@@ -652,6 +680,23 @@ core::Status Player::Stop() {
     if (state_.load() != PlaybackState::Stopped) {
         IAudioClient* pAc = reinterpret_cast<IAudioClient*>(pAudioClient_);
         pAc->Stop();
+
+        // Make the Stop intent visible to the render thread before joining.
+        // The thread tolerates an indefinite Paused wait (client stopped, no
+        // event), so without this it cannot tell "Stop() was called" from
+        // "intentional pause" and the join would hang. Preserve DeviceLost:
+        // a lost device already exited (or is exiting) the thread on its own.
+        // Signaling hEvent_ wakes a thread blocked in WaitForSingleObject
+        // promptly instead of waiting out the full 2s Playing timeout.
+        // Cleanup below (releases, CoUninitialize) is unchanged.
+        const PlaybackState stopFrom = state_.load();
+        if (stopFrom == PlaybackState::Playing ||
+            stopFrom == PlaybackState::Paused) {
+            state_.store(PlaybackState::Stopped);
+        }
+        if (hEvent_) {
+            SetEvent(reinterpret_cast<HANDLE>(hEvent_));
+        }
 
         if (renderThread_.joinable()) {
             renderThread_.join();
@@ -752,32 +797,112 @@ void Player::RenderThreadEntry() {
     IAudioClient* pAc = reinterpret_cast<IAudioClient*>(pAudioClient_);
     HRESULT hr = pAc->Start();
     if (FAILED(hr)) {
-        state_ = PlaybackState::Stopped;
+        // A dead device or dead audio service at startup must stay
+        // DeviceLost, distinct from a clean Stopped exit (same rule as the
+        // loop-exit preservation below).
+        if (IsDeviceGone(hr) ||
+            state_.load() == PlaybackState::DeviceLost) {
+            HandleDeviceLost();
+        } else {
+            state_ = PlaybackState::Stopped;
+        }
         return;
     }
 
-    while (state_.load() == PlaybackState::Playing) {
+    while (true) {
+        const PlaybackState loopState = state_.load();
+        if (loopState == PlaybackState::Stopped ||
+            loopState == PlaybackState::DeviceLost) {
+            break;
+        }
+        if (loopState == PlaybackState::Paused) {
+            // Intentional pause: Pause() stopped the client, so the buffer
+            // event will not re-signal until Resume() calls Start(). A lack
+            // of event here is expected, never device loss. Poll with a
+            // short timeout so Resume()/Stop() (both SetEvent hEvent_) are
+            // noticed promptly, and probe for unplug-while-paused so a
+            // genuine invalidation still lands in DeviceLost.
+            WaitForSingleObject(
+                reinterpret_cast<HANDLE>(hEvent_), 100);
+            UINT32 pad = 0;
+            const HRESULT qhr = pAc->GetCurrentPadding(&pad);
+            if (IsDeviceGone(qhr)) {
+                HandleDeviceLost();
+                break;
+            }
+            continue;
+        }
+
         DWORD waitResult = WaitForSingleObject(
             reinterpret_cast<HANDLE>(hEvent_), 2000);
 
-        if (waitResult != WAIT_OBJECT_0) {
-            HandleDeviceLost();
-            break;
+        if (waitResult == WAIT_OBJECT_0) {
+            // Pause()/Stop() may have raced with the signal; re-check
+            // before touching the buffer so a pause is never rendered
+            // past and a stop is never mistaken for data.
+            const PlaybackState signaledState = state_.load();
+            if (signaledState == PlaybackState::Paused) {
+                continue;
+            }
+            if (signaledState == PlaybackState::Stopped ||
+                signaledState == PlaybackState::DeviceLost) {
+                break;
+            }
+            if (!RenderIteration()) {
+                break;
+            }
+            if (state_.load() == PlaybackState::DeviceLost) {
+                break;
+            }
+            continue;
         }
 
-        if (!RenderIteration()) {
+        // Timeout or wait failure: never assume loss. Pause() stops the
+        // client (no more events) and sets Paused; Stop() now stores
+        // Stopped and signals before joining. Re-check state first.
+        const PlaybackState timeoutState = state_.load();
+        if (timeoutState == PlaybackState::Paused) {
+            continue;
+        }
+        if (timeoutState == PlaybackState::Stopped ||
+            timeoutState == PlaybackState::DeviceLost) {
             break;
+        }
+        // Still Playing: distinguish "we stopped the client ourselves"
+        // from "the device is actually gone" with a non-destructive probe.
+        // GetCurrentPadding reports a dead device or dead audio service via
+        // IsDeviceGone (Microsoft Learn: Recovering from an Invalid-Device
+        // Error + GetCurrentPadding remarks; RenderIteration treats the same
+        // codes from GetBuffer / ReleaseBuffer as loss). Anything else is
+        // scheduling jitter or a Stop() race whose state store lands on the
+        // next iteration, so keep waiting instead of declaring loss.
+        {
+            UINT32 pad = 0;
+            const HRESULT qhr = pAc->GetCurrentPadding(&pad);
+            if (IsDeviceGone(qhr)) {
+                HandleDeviceLost();
+                break;
+            }
         }
     }
 
-    // Wait for last buffer to play.
-    REFERENCE_TIME hnsPeriod = 0;
-    pAc->GetDevicePeriod(nullptr, &hnsPeriod);
-    Sleep(static_cast<DWORD>(hnsPeriod / 10000));
+    // Drain only on a clean Playing exit (end-of-stream): let the last
+    // buffer play, then stop the client. On a Stop()-requested exit the
+    // client is already stopped (Stop() did it before joining), and on a
+    // DeviceLost exit the device is dead — calling into it again only delays
+    // the join, so skip straight to the exit-reason preservation below.
+    // A Paused thread never reaches here on its own (only via Stop/DeviceLost
+    // above); defensively, any non-Playing reason is left untouched so
+    // DeviceLost stays distinct from Stopped. EOS is Playing -> Stopped.
+    if (state_.load() == PlaybackState::Playing) {
+        REFERENCE_TIME hnsPeriod = 0;
+        pAc->GetDevicePeriod(nullptr, &hnsPeriod);
+        Sleep(static_cast<DWORD>(hnsPeriod / 10000));
 
-    pAc->Stop();
+        pAc->Stop();
 
-    state_ = PlaybackState::Stopped;
+        state_ = PlaybackState::Stopped;
+    }
 }
 
 Player::~Player() {
@@ -854,7 +979,7 @@ bool Player::RenderIteration() {
     BYTE* pData = nullptr;
     HRESULT hr = pRC->GetBuffer(bufferFrameCount_, &pData);
     if (FAILED(hr) || pData == nullptr) {
-        if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
+        if (IsDeviceGone(hr)) {
             HandleDeviceLost();
         }
         return false;
@@ -892,7 +1017,7 @@ bool Player::RenderIteration() {
 
     hr = pRC->ReleaseBuffer(framesRead, flags);
     if (FAILED(hr)) {
-        if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
+        if (IsDeviceGone(hr)) {
             HandleDeviceLost();
         }
         return false;
