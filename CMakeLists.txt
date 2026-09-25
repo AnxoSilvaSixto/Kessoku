@@ -58,6 +58,7 @@ target_include_directories(Kessoku PRIVATE
 target_link_libraries(Kessoku PRIVATE
     kessoku_core
     kessoku_audio
+    kessoku_library
     FLAC::FLAC
     TagLib::TagLib
 )
