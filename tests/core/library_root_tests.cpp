@@ -166,9 +166,19 @@ int main() {
         CHECK(!libRoot.Contains(siblingFile),
               "absolute path on same drive, outside root");
         RemoveDirectoryW(siblingDir.c_str());
+    } else {
+        printf("SKIP: same-drive sibling test (could not create directory)\n");
     }
 
-    // (e) An absolute path on a different drive letter -> false
+    // (e) A different-drive-letter-form path that does not exist on this
+    // machine -> false via the not-found early return. NOTE: this does NOT
+    // reach the drive-letter prefix comparison in Contains(): only C: exists
+    // here (verified), so no existing file on another drive can be produced
+    // deterministically with plain Win32 calls (a subst-mapped drive resolves
+    // through to the underlying C: path in GetFinalPathNameByHandleW before
+    // comparison — verified empirically — and mounting a real second volume
+    // needs elevation). Named honestly instead of claiming drive-specific
+    // logic ran; passes for the same reason as (k).
     std::wstring otherDriveRoot;
     if (StringStartsWith(root, L"C:\\")) {
         otherDriveRoot = L"D:\\Windows\\System32\\cmd.exe";
@@ -176,11 +186,15 @@ int main() {
         otherDriveRoot = L"C:\\Windows\\System32\\cmd.exe";
     }
     CHECK(!libRoot.Contains(otherDriveRoot),
-          "absolute path on different drive letter");
+          "nonexistent path in different-drive form -> false");
 
-    // (f) A UNC path -> false
+    // (f) A UNC-form path with no reachable share -> false via the not-found
+    // early return. NOTE: same gap as (e) — no deterministic way to produce
+    // an existing UNC path with plain Win32 calls (needs a real network
+    // share), so UNC-specific comparison logic is not reached. Named honestly;
+    // passes for the same reason as (k), not because UNC logic ran.
     std::wstring uncPath = L"\\\\server\\share\\file.flac";
-    CHECK(!libRoot.Contains(uncPath), "UNC path");
+    CHECK(!libRoot.Contains(uncPath), "nonexistent UNC-form path -> false");
 
     // (g) A sibling whose name has the root's name as a string prefix -> false
     std::wstring rootBasename = root.substr(root.find_last_of(L'\\') + 1);

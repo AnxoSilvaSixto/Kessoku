@@ -29,6 +29,20 @@ void Check(bool condition, const char* testName, const char* desc,
 
 #define CHECK(cond, desc) Check((cond), __func__, (desc), __LINE__)
 
+// True when Player::Create failed for an environment reason (no default
+// device, device rejects this format in exclusive mode, or exclusive mode is
+// busy/disallowed) rather than a product regression. Callers print an honest
+// SKIP instead of failing the test. Any other code (notably AudioInitFailed)
+// is a genuine failure and must still hit CHECK. The code distinction comes
+// from player.cpp: DeviceNotFound for enumerator/endpoint failures,
+// FormatNotSupported for IsFormatSupported rejection, ExclusiveModeUnavailable
+// via HResultToErrorCode for EXCLUSIVE_MODE_NOT_ALLOWED/DEVICE_IN_USE.
+bool IsEnvironmentSkipCode(kessoku::core::ErrorCode code) {
+    return code == kessoku::core::ErrorCode::DeviceNotFound ||
+           code == kessoku::core::ErrorCode::FormatNotSupported ||
+           code == kessoku::core::ErrorCode::ExclusiveModeUnavailable;
+}
+
 // Minimal WAV file builder: creates a PCM WAV file with given parameters.
 bool CreateTestWav(std::wstring_view path, uint32_t sampleRate,
                    uint16_t bitsPerSample, uint16_t channelCount,
@@ -221,7 +235,14 @@ int main() {
 
         if (!wavPath.empty()) {
             auto result = kessoku::audio::Player::Create(wavPath);
-            CHECK(result.IsOk(), "Player::Create succeeds for valid WAV");
+            if (result.IsErr() &&
+                IsEnvironmentSkipCode(result.GetError().code)) {
+                printf("SKIP: WAV lifecycle test "
+                       "(no compatible exclusive-mode audio device)\n");
+            } else {
+                CHECK(result.IsOk(),
+                      "Player::Create succeeds for valid WAV");
+            }
 
             if (result.IsOk()) {
                 auto& player = result.Value();
@@ -306,7 +327,13 @@ int main() {
 
         if (!wavPath.empty()) {
             auto result = kessoku::audio::Player::Create(wavPath);
-            CHECK(result.IsOk(), "Player::Create for state test");
+            if (result.IsErr() &&
+                IsEnvironmentSkipCode(result.GetError().code)) {
+                printf("SKIP: WAV state test "
+                       "(no compatible exclusive-mode audio device)\n");
+            } else {
+                CHECK(result.IsOk(), "Player::Create for state test");
+            }
 
             if (result.IsOk()) {
                 auto player = std::move(result.Value());
@@ -357,7 +384,13 @@ int main() {
 
         if (!wavPath.empty()) {
             auto result = kessoku::audio::Player::Create(wavPath);
-            CHECK(result.IsOk(), "Player::Create for position test");
+            if (result.IsErr() &&
+                IsEnvironmentSkipCode(result.GetError().code)) {
+                printf("SKIP: WAV position test "
+                       "(no compatible exclusive-mode audio device)\n");
+            } else {
+                CHECK(result.IsOk(), "Player::Create for position test");
+            }
 
             if (result.IsOk()) {
                 auto player = std::move(result.Value());
@@ -387,7 +420,13 @@ int main() {
 
         if (!wavPath.empty()) {
             auto result = kessoku::audio::Player::Create(wavPath);
-            CHECK(result.IsOk(), "Player::Create for seek test");
+            if (result.IsErr() &&
+                IsEnvironmentSkipCode(result.GetError().code)) {
+                printf("SKIP: WAV seek test "
+                       "(no compatible exclusive-mode audio device)\n");
+            } else {
+                CHECK(result.IsOk(), "Player::Create for seek test");
+            }
 
             if (result.IsOk()) {
                 auto player = std::move(result.Value());
@@ -415,39 +454,38 @@ int main() {
     }
 
     // --- Test 6: Device loss state transition ---
+    // GAP (explicit, per test-fidelity constraints): there is currently no
+    // way to drive Player into PlaybackState::DeviceLost deterministically.
+    // HandleDeviceLost() is private, Player exposes no test hook, friend, or
+    // HRESULT-injection seam, and the only production triggers are real device
+    // invalidation (AUDCLNT_E_DEVICE_INVALIDATED / SERVICE_NOT_RUNNING on the
+    // render thread) — i.e. real hardware manipulation. The previous
+    // enum-distinctness CHECKs were true by construction for a plain enum
+    // class regardless of anything Player does at runtime, so they have been
+    // removed rather than left in place uncommented. Deterministic coverage of
+    // the DeviceLost transition needs a production-code seam (e.g. a
+    // test-only entry point that invokes the device-gone path); adding one is
+    // out of scope here — this is reported as a named gap instead.
     {
-        // We can't easily force real device loss, but we can test that
-        // the state machine handles the DeviceLost state correctly.
-        // Create a player, then manually verify the state enum is distinct.
-
         std::wstring wavPath = CreateTempWav(
             L"\\kessoku_test_player6_", 44100, 16, 2, 44100);
         CHECK(!wavPath.empty(), "Create temp WAV for device loss test");
 
         if (!wavPath.empty()) {
             auto result = kessoku::audio::Player::Create(wavPath);
-            CHECK(result.IsOk(), "Player::Create for device loss test");
+            if (result.IsErr() &&
+                IsEnvironmentSkipCode(result.GetError().code)) {
+                printf("SKIP: device-loss test "
+                       "(no compatible exclusive-mode audio device)\n");
+            } else {
+                CHECK(result.IsOk(), "Player::Create for device loss test");
+            }
 
             if (result.IsOk()) {
                 auto player = std::move(result.Value());
 
-                // Verify all states are distinct values
-                CHECK(
-                    static_cast<int>(kessoku::audio::PlaybackState::Stopped) !=
-                    static_cast<int>(kessoku::audio::PlaybackState::Playing),
-                    "Stopped != Playing");
-                CHECK(
-                    static_cast<int>(kessoku::audio::PlaybackState::Playing) !=
-                    static_cast<int>(kessoku::audio::PlaybackState::Paused),
-                    "Playing != Paused");
-                CHECK(
-                    static_cast<int>(kessoku::audio::PlaybackState::Paused) !=
-                    static_cast<int>(kessoku::audio::PlaybackState::DeviceLost),
-                    "Paused != DeviceLost");
-                CHECK(
-                    static_cast<int>(kessoku::audio::PlaybackState::Stopped) !=
-                    static_cast<int>(kessoku::audio::PlaybackState::DeviceLost),
-                    "Stopped != DeviceLost");
+                printf("SKIP: device-loss coverage (no seam to drive Player "
+                       "into DeviceLost without real hardware manipulation)\n");
 
                 player.Stop();
             }
@@ -464,7 +502,14 @@ int main() {
 
         if (!wavPath.empty()) {
             auto result = kessoku::audio::Player::Create(wavPath);
-            CHECK(result.IsOk(), "Player::Create for idempotent stop test");
+            if (result.IsErr() &&
+                IsEnvironmentSkipCode(result.GetError().code)) {
+                printf("SKIP: idempotent-stop test "
+                       "(no compatible exclusive-mode audio device)\n");
+            } else {
+                CHECK(result.IsOk(),
+                      "Player::Create for idempotent stop test");
+            }
 
             if (result.IsOk()) {
                 auto player = std::move(result.Value());
@@ -690,7 +735,14 @@ int main() {
 
         if (!flacPath.empty()) {
             auto result = kessoku::audio::Player::Create(flacPath);
-            CHECK(result.IsOk(), "Player::Create succeeds for valid FLAC");
+            if (result.IsErr() &&
+                IsEnvironmentSkipCode(result.GetError().code)) {
+                printf("SKIP: FLAC lifecycle test "
+                       "(no compatible exclusive-mode audio device)\n");
+            } else {
+                CHECK(result.IsOk(),
+                      "Player::Create succeeds for valid FLAC");
+            }
 
             if (result.IsOk()) {
                 auto& player = result.Value();
@@ -719,7 +771,13 @@ int main() {
 
         if (!flacPath.empty()) {
             auto result = kessoku::audio::Player::Create(flacPath);
-            CHECK(result.IsOk(), "Player::Create for FLAC state test");
+            if (result.IsErr() &&
+                IsEnvironmentSkipCode(result.GetError().code)) {
+                printf("SKIP: FLAC state test "
+                       "(no compatible exclusive-mode audio device)\n");
+            } else {
+                CHECK(result.IsOk(), "Player::Create for FLAC state test");
+            }
 
             if (result.IsOk()) {
                 auto player = std::move(result.Value());
@@ -768,7 +826,13 @@ int main() {
 
         if (!flacPath.empty()) {
             auto result = kessoku::audio::Player::Create(flacPath);
-            CHECK(result.IsOk(), "Player::Create for FLAC seek test");
+            if (result.IsErr() &&
+                IsEnvironmentSkipCode(result.GetError().code)) {
+                printf("SKIP: FLAC seek test "
+                       "(no compatible exclusive-mode audio device)\n");
+            } else {
+                CHECK(result.IsOk(), "Player::Create for FLAC seek test");
+            }
 
             if (result.IsOk()) {
                 auto player = std::move(result.Value());
@@ -878,7 +942,13 @@ int main() {
 
         if (!wavPath.empty()) {
             auto result = kessoku::audio::Player::Create(wavPath);
-            CHECK(result.IsOk(), "Player::Create for replay test");
+            if (result.IsErr() &&
+                IsEnvironmentSkipCode(result.GetError().code)) {
+                printf("SKIP: replay test "
+                       "(no compatible exclusive-mode audio device)\n");
+            } else {
+                CHECK(result.IsOk(), "Player::Create for replay test");
+            }
 
             if (result.IsOk()) {
                 auto player = std::move(result.Value());
@@ -921,7 +991,14 @@ int main() {
 
         if (!wavPath.empty()) {
             auto result = kessoku::audio::Player::Create(wavPath);
-            CHECK(result.IsOk(), "Player::Create for paused-replay test");
+            if (result.IsErr() &&
+                IsEnvironmentSkipCode(result.GetError().code)) {
+                printf("SKIP: paused-replay test "
+                       "(no compatible exclusive-mode audio device)\n");
+            } else {
+                CHECK(result.IsOk(),
+                      "Player::Create for paused-replay test");
+            }
 
             if (result.IsOk()) {
                 auto player = std::move(result.Value());
@@ -961,7 +1038,13 @@ int main() {
 
         if (!wavPath.empty()) {
             auto result = kessoku::audio::Player::Create(wavPath);
-            CHECK(result.IsOk(), "Player::Create for long-pause test");
+            if (result.IsErr() &&
+                IsEnvironmentSkipCode(result.GetError().code)) {
+                printf("SKIP: long-pause test "
+                       "(no compatible exclusive-mode audio device)\n");
+            } else {
+                CHECK(result.IsOk(), "Player::Create for long-pause test");
+            }
 
             if (result.IsOk()) {
                 auto player = std::move(result.Value());
@@ -1040,7 +1123,14 @@ int main() {
             }
 
             auto result = kessoku::audio::Player::Create(flacPath);
-            CHECK(result.IsOk(), "Player::Create for decode-error test");
+            if (result.IsErr() &&
+                IsEnvironmentSkipCode(result.GetError().code)) {
+                printf("SKIP: decode-error test "
+                       "(no compatible exclusive-mode audio device)\n");
+            } else {
+                CHECK(result.IsOk(),
+                      "Player::Create for decode-error test");
+            }
 
             if (result.IsOk()) {
                 auto player = std::move(result.Value());
@@ -1141,7 +1231,14 @@ int main() {
 
         if (!wavPath.empty()) {
             auto result = kessoku::audio::Player::Create(wavPath);
-            CHECK(result.IsOk(), "Player::Create for truncated WAV test");
+            if (result.IsErr() &&
+                IsEnvironmentSkipCode(result.GetError().code)) {
+                printf("SKIP: truncated-WAV test "
+                       "(no compatible exclusive-mode audio device)\n");
+            } else {
+                CHECK(result.IsOk(),
+                      "Player::Create for truncated WAV test");
+            }
 
             if (result.IsOk()) {
                 auto player = std::move(result.Value());

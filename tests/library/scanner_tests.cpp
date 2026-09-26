@@ -182,7 +182,7 @@ int main() {
         auto outsideFiles = CreateFlacDirectory(outsideDir, 3);
 
         std::wstring junctionPath = root + L"\\junction_to_outside";
-        CreateJunction(junctionPath, outsideDir);
+        bool junctionOk = CreateJunction(junctionPath, outsideDir);
 
         auto result = kessoku::core::LibraryRoot::Create(root);
         if (!result.IsOk()) {
@@ -193,14 +193,20 @@ int main() {
 
         auto scanResult = kessoku::library::Scan(result.Value());
 
-        CHECK(scanResult.files.empty(), "junction target files not in results");
-        CHECK(SkippedContainsReason(scanResult.skipped,
-                                    std::wstring_view(junctionPath),
-                                    "reparse point (not followed)"),
-              "junction appears in skipped with correct reason");
+        if (junctionOk) {
+            CHECK(scanResult.files.empty(),
+                  "junction target files not in results");
+            CHECK(SkippedContainsReason(scanResult.skipped,
+                                        std::wstring_view(junctionPath),
+                                        "reparse point (not followed)"),
+                  "junction appears in skipped with correct reason");
 
-        DeleteFileW(junctionPath.c_str());
-        RemoveDirectoryW(junctionPath.c_str());
+            DeleteFileW(junctionPath.c_str());
+            RemoveDirectoryW(junctionPath.c_str());
+        } else {
+            printf("SKIP: junction test (could not create junction)\n");
+        }
+
         RemoveTempDir(outsideDir);
         RemoveTempDir(root);
     }
@@ -333,10 +339,13 @@ int main() {
         CHECK(PathContains(scanResult.files, goodFile),
               "good.flac found despite broken junction");
 
-        // The broken junction may or may not appear in skipped depending
-        // on how the filesystem handles it. The key invariant is that
-        // the scan doesn't crash and the good file is still found.
-        // If the broken junction is encountered, it should be in skipped.
+        // The broken-junction outcome is filesystem-dependent: the entry may
+        // be reported in skipped, or silently skipped by the filesystem, or
+        // (as on this machine, where mklink /J refuses a nonexistent target)
+        // never created at all. None of those outcomes is asserted here — a
+        // CHECK in any branch would pass or fail independent of scanner
+        // behavior. The deterministic invariant (scan survives, good file
+        // found) is already checked above; here we only report what happened.
         if (brokenOk) {
             bool foundInSkipped = false;
             for (const auto& entry : scanResult.skipped) {
@@ -347,7 +356,7 @@ int main() {
                 }
             }
             if (foundInSkipped) {
-                CHECK(true, "broken junction in skipped (expected)");
+                printf("INFO: broken junction reported in skipped\n");
             } else {
                 // The filesystem may silently skip broken junctions,
                 // which is also acceptable behavior.
@@ -390,18 +399,20 @@ int main() {
 
         auto scanResult = kessoku::library::Scan(result.Value());
 
-        CHECK(PathContains(scanResult.files, goodFile),
-              "good.flac found despite cycle junction");
-        CHECK(SkippedContainsReason(scanResult.skipped,
-                                    std::wstring_view(cycleJunction),
-                                    "reparse point (not followed)"),
-              "cycle junction skipped (scan terminated)");
-        CHECK(scanResult.files.size() == 1,
-              "only one file found (no infinite recursion)");
-
         if (cycleOk) {
+            CHECK(PathContains(scanResult.files, goodFile),
+                  "good.flac found despite cycle junction");
+            CHECK(SkippedContainsReason(scanResult.skipped,
+                                        std::wstring_view(cycleJunction),
+                                        "reparse point (not followed)"),
+                  "cycle junction skipped (scan terminated)");
+            CHECK(scanResult.files.size() == 1,
+                  "only one file found (no infinite recursion)");
+
             DeleteFileW(cycleJunction.c_str());
             RemoveDirectoryW(cycleJunction.c_str());
+        } else {
+            printf("SKIP: cycle junction test (could not create junction)\n");
         }
         RemoveTempDir(root);
     }
