@@ -31,12 +31,14 @@ public:
     BEGIN_MSG_MAP(MainWindow)
         MESSAGE_HANDLER(WM_CREATE, OnCreate)
         MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
+        MESSAGE_HANDLER(WM_SIZE, OnSize)
         MESSAGE_HANDLER(WM_SCAN_COMPLETE, OnScanComplete)
     END_MSG_MAP()
 
     LRESULT OnCreate(UINT, WPARAM, LPARAM, BOOL&)
     {
-        RECT listRect = { 0, 0, 0, 0 };
+        RECT listRect;
+        GetClientRect(&listRect);
         m_listView.Create(*this, listRect, nullptr,
             WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
             WS_EX_CLIENTEDGE);
@@ -47,6 +49,14 @@ public:
         m_listView.InsertColumn(3, L"Track#", LVCFMT_LEFT, 60);
 
         ShowEmptyState();
+        return 0;
+    }
+
+    LRESULT OnSize(UINT, WPARAM, LPARAM lParam, BOOL&)
+    {
+        if (m_listView.IsWindow()) {
+            m_listView.MoveWindow(0, 0, LOWORD(lParam), HIWORD(lParam));
+        }
         return 0;
     }
 
