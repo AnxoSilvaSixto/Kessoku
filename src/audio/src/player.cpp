@@ -1082,7 +1082,18 @@ bool Player::RenderIteration() {
         flags = AUDCLNT_BUFFERFLAGS_SILENT;
     }
 
-    hr = pRC->ReleaseBuffer(framesRead, flags);
+    // Exclusive-mode, event-driven contract
+    // (IAudioRenderClient::ReleaseBuffer): NumFramesWritten must equal
+    // NumFramesRequested (bufferFrameCount_) from the preceding GetBuffer;
+    // a short count fails with AUDCLNT_E_BUFFER_SIZE_ERROR. The buffer is
+    // already pre-silenced via memset above, so releasing the full size
+    // pads a partial tail with silence. flags is unchanged: SILENT exactly
+    // when framesRead == 0.
+    const UINT32 numFramesWritten = bufferFrameCount_;
+    assert(numFramesWritten == bufferFrameCount_);
+    assert(framesRead <= bufferFrameCount_);
+
+    hr = pRC->ReleaseBuffer(numFramesWritten, flags);
     if (FAILED(hr)) {
         if (IsDeviceGone(hr)) {
             HandleDeviceLost();
