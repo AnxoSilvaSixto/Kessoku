@@ -1,8 +1,12 @@
 ---
-name: cpp-reviewer
 description: Expert C++ code reviewer specializing in memory safety, modern C++ idioms, concurrency, and performance. Use for all C++ code changes. MUST BE USED for C++ projects.
-tools: Read, Grep, Glob, Bash
-model: sonnet
+mode: subagent
+permission:
+  read: allow
+  grep: allow
+  glob: allow
+  bash: allow
+  edit: deny
 ---
 
 ## Prompt Defense Baseline
