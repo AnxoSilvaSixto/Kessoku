@@ -4,6 +4,9 @@
 
 #include <windows.h>
 
+#include <mmdeviceapi.h>
+#include <audioclient.h>
+
 #include <FLAC/stream_encoder.h>
 
 #include <array>
@@ -220,6 +223,220 @@ void CleanupTempFlac(std::wstring_view path) {
     std::wstring dir = std::wstring(path).substr(
         0, std::wstring(path).find_last_of(L'\\'));
     RemoveDirectoryW(dir.c_str());
+}
+
+// Query the exclusive-mode event-driven buffer size for a PCM format,
+// mirroring Player::Create negotiation (IsFormatSupported ->
+// GetDevicePeriod -> Initialize -> GetBufferSize, with the
+// BUFFER_SIZE_NOT_ALIGNED retry). Returns false when there is no usable
+// device/format (caller must SKIP, not FAIL). Releases everything it
+// acquires; balances CoInitializeEx. Never assumes a buffer size.
+bool QueryExclusiveBufferFrames(uint32_t sampleRate, uint16_t bitsPerSample,
+                                uint16_t channelCount, UINT32& outFrames) {
+    outFrames = 0;
+
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (hr == RPC_E_CHANGED_MODE) {
+        hr = S_OK;
+    }
+    if (FAILED(hr)) {
+        return false;
+    }
+    const bool didInit = (hr == S_OK);
+
+    IMMDeviceEnumerator* pEnumerator = nullptr;
+    IMMDevice* pDevice = nullptr;
+    IAudioClient* pAudioClient = nullptr;
+
+    auto cleanup = [&](bool uninit) {
+        if (pAudioClient != nullptr) {
+            pAudioClient->Release();
+            pAudioClient = nullptr;
+        }
+        if (pDevice != nullptr) {
+            pDevice->Release();
+            pDevice = nullptr;
+        }
+        if (pEnumerator != nullptr) {
+            pEnumerator->Release();
+            pEnumerator = nullptr;
+        }
+        if (uninit && didInit) {
+            CoUninitialize();
+        }
+    };
+
+    hr = CoCreateInstance(
+        __uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+        __uuidof(IMMDeviceEnumerator),
+        reinterpret_cast<void**>(&pEnumerator));
+    if (FAILED(hr) || pEnumerator == nullptr) {
+        cleanup(true);
+        return false;
+    }
+
+    hr = pEnumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &pDevice);
+    if (FAILED(hr) || pDevice == nullptr) {
+        cleanup(true);
+        return false;
+    }
+
+    hr = pDevice->Activate(
+        __uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+        reinterpret_cast<void**>(&pAudioClient));
+    if (FAILED(hr) || pAudioClient == nullptr) {
+        cleanup(true);
+        return false;
+    }
+
+    WAVEFORMATEXTENSIBLE wfx{};
+    wfx.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+    wfx.Format.nChannels = channelCount;
+    wfx.Format.nSamplesPerSec = sampleRate;
+    wfx.Format.wBitsPerSample = bitsPerSample;
+    wfx.Format.nBlockAlign =
+        static_cast<WORD>(channelCount * (bitsPerSample / 8));
+    wfx.Format.nAvgBytesPerSec =
+        wfx.Format.nSamplesPerSec * wfx.Format.nBlockAlign;
+    wfx.Format.cbSize = 22;
+    wfx.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+    wfx.dwChannelMask =
+        (channelCount == 1) ? KSAUDIO_SPEAKER_MONO : KSAUDIO_SPEAKER_STEREO;
+    wfx.Samples.wValidBitsPerSample = bitsPerSample;
+
+    WAVEFORMATEX* pClosest = nullptr;
+    hr = pAudioClient->IsFormatSupported(
+        AUDCLNT_SHAREMODE_EXCLUSIVE,
+        reinterpret_cast<WAVEFORMATEX*>(&wfx), &pClosest);
+    if (pClosest != nullptr) {
+        CoTaskMemFree(pClosest);
+        pClosest = nullptr;
+    }
+    if (hr != S_OK) {
+        cleanup(true);
+        return false;
+    }
+
+    REFERENCE_TIME hnsMinPeriod = 0;
+    hr = pAudioClient->GetDevicePeriod(&hnsMinPeriod, nullptr);
+    if (FAILED(hr)) {
+        cleanup(true);
+        return false;
+    }
+
+    REFERENCE_TIME hnsBufferDuration = hnsMinPeriod;
+    hr = pAudioClient->Initialize(
+        AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+        hnsBufferDuration, hnsBufferDuration,
+        reinterpret_cast<WAVEFORMATEX*>(&wfx), nullptr);
+
+    if (hr == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED) {
+        UINT32 nFrames = 0;
+        hr = pAudioClient->GetBufferSize(&nFrames);
+        if (SUCCEEDED(hr)) {
+            hnsBufferDuration = static_cast<REFERENCE_TIME>(
+                (10000.0 * 1000.0 / static_cast<double>(sampleRate) *
+                 static_cast<double>(nFrames)) +
+                0.5);
+        }
+        cleanup(true);
+
+        hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        if (hr == RPC_E_CHANGED_MODE) {
+            hr = S_OK;
+        }
+        if (FAILED(hr)) {
+            return false;
+        }
+        const bool didInit2 = (hr == S_OK);
+
+        hr = CoCreateInstance(
+            __uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+            __uuidof(IMMDeviceEnumerator),
+            reinterpret_cast<void**>(&pEnumerator));
+        if (FAILED(hr) || pEnumerator == nullptr) {
+            if (didInit2) {
+                CoUninitialize();
+            }
+            pEnumerator = nullptr;
+            return false;
+        }
+        hr = pEnumerator->GetDefaultAudioEndpoint(eRender, eMultimedia,
+                                                 &pDevice);
+        if (FAILED(hr) || pDevice == nullptr) {
+            if (pEnumerator != nullptr) {
+                pEnumerator->Release();
+                pEnumerator = nullptr;
+            }
+            if (didInit2) {
+                CoUninitialize();
+            }
+            pDevice = nullptr;
+            return false;
+        }
+        hr = pDevice->Activate(
+            __uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+            reinterpret_cast<void**>(&pAudioClient));
+        if (FAILED(hr) || pAudioClient == nullptr) {
+            if (pDevice != nullptr) {
+                pDevice->Release();
+                pDevice = nullptr;
+            }
+            if (pEnumerator != nullptr) {
+                pEnumerator->Release();
+                pEnumerator = nullptr;
+            }
+            if (didInit2) {
+                CoUninitialize();
+            }
+            pAudioClient = nullptr;
+            return false;
+        }
+        hr = pAudioClient->Initialize(
+            AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+            hnsBufferDuration, hnsBufferDuration,
+            reinterpret_cast<WAVEFORMATEX*>(&wfx), nullptr);
+        if (FAILED(hr)) {
+            cleanup(false);
+            if (didInit2) {
+                CoUninitialize();
+            }
+            if (didInit) {
+                CoUninitialize();
+            }
+            return false;
+        }
+        // Fall through to GetBufferSize with both inits outstanding;
+        // both are balanced below.
+        UINT32 bufferFrames = 0;
+        hr = pAudioClient->GetBufferSize(&bufferFrames);
+        cleanup(false);
+        if (didInit2) {
+            CoUninitialize();
+        }
+        if (didInit) {
+            CoUninitialize();
+        }
+        if (FAILED(hr) || bufferFrames == 0) {
+            return false;
+        }
+        outFrames = bufferFrames;
+        return true;
+    }
+
+    if (FAILED(hr)) {
+        cleanup(true);
+        return false;
+    }
+
+    UINT32 bufferFrames = 0;
+    hr = pAudioClient->GetBufferSize(&bufferFrames);
+    cleanup(true);
+    if (FAILED(hr) || bufferFrames == 0) {
+        return false;
+    }
+    outFrames = bufferFrames;
+    return true;
 }
 
 } // namespace
@@ -1159,12 +1376,13 @@ int main() {
         }
     }
 
-    // --- Test 21: Truncated WAV file stops playback (hang fix) ---
+    // --- Test 21: Truncated WAV (overstated data chunk) fails Create() ---
     // A WAV file whose data-chunk header declares more samples than are
-    // actually present in the file. When the declared size exceeds what's
-    // readable, the render loop would spin forever writing silence without
-    // the fix. With the fix, the read failure is detected and playback
-    // stops like natural EOS.
+    // actually present in the file. Create() rejects it deterministically
+    // with a clean error before any audio setup — no playback, no polling.
+    // (Runtime detection is inherently ambiguous here: ReadFile past real
+    // EOF returns TRUE with 0 bytes, indistinguishable from a short wait,
+    // so the header must be validated up front.)
     {
         // Create a WAV with header declaring 441000 frames (10s) but only
         // write 4410 frames (0.1s) of actual data. The file is truncated.
@@ -1227,44 +1445,154 @@ int main() {
                 CloseHandle(hFile);
             }
         }
-        CHECK(!wavPath.empty(), "Create truncated WAV for read-error test");
+        CHECK(!wavPath.empty(), "Create truncated WAV fixture");
 
         if (!wavPath.empty()) {
+            // Deterministic rejection before any WASAPI setup: no device
+            // needed, so no environment SKIP applies here.
             auto result = kessoku::audio::Player::Create(wavPath);
-            if (result.IsErr() &&
-                IsEnvironmentSkipCode(result.GetError().code)) {
-                printf("SKIP: truncated-WAV test "
-                       "(no compatible exclusive-mode audio device)\n");
-            } else {
-                CHECK(result.IsOk(),
-                      "Player::Create for truncated WAV test");
-            }
-
-            if (result.IsOk()) {
-                auto player = std::move(result.Value());
-
-                CHECK(player.Play().IsOk(), "Play() succeeds for truncated WAV");
-
-                // Poll with a bounded deadline. Without the fix, this hangs
-                // forever. With the fix, playback stops within a few seconds.
-                bool stopped = false;
-                for (int i = 0; i < 40; ++i) {
-                    if (player.GetState() ==
-                        kessoku::audio::PlaybackState::Stopped) {
-                        stopped = true;
-                        break;
-                    }
-                    Sleep(250);
-                }
-                CHECK(stopped,
-                      "Truncated WAV stops within deadline (not hang)");
-
-                player.Stop();
+            CHECK(result.IsErr(),
+                  "Player::Create fails for truncated WAV");
+            if (result.IsErr()) {
+                CHECK(result.GetError().code ==
+                          kessoku::core::ErrorCode::AudioInitFailed,
+                      "Error code is AudioInitFailed");
             }
 
             DeleteFileW(wavPath.data());
             std::wstring dir = tempDir;
             RemoveDirectoryW(dir.c_str());
+        }
+    }
+
+    // --- Test 22: Final partial buffer releases the full buffer size ---
+    // Regression: RenderIteration released framesRead (short count) to an
+    // exclusive-mode, event-driven stream. Microsoft's ReleaseBuffer
+    // contract rejects that with AUDCLNT_E_BUFFER_SIZE_ERROR: the client
+    // must release exactly NumFramesRequested from the preceding GetBuffer
+    // (the buffer is pre-silenced via memset; only the reported count was
+    // wrong). Every track whose length is not an exact multiple of the
+    // negotiated buffer lost its final sub-buffer silently. Invisible to
+    // state/position testing by construction (position advances before
+    // ReleaseBuffer; failure still lands in Stopped), so this test
+    // exercises misaligned WAV+FLAC fixtures to natural EOS while the
+    // instrumented player log proves the final ReleaseBuffer carries the
+    // full buffer size with S_OK. Buffer size is queried the way Player
+    // itself does (GetBufferSize); never hardcoded or assumed.
+    {
+        const uint32_t kRate = 44100;
+        const uint16_t kBits = 16;
+        const uint16_t kCh = 2;
+        UINT32 bufFrames = 0;
+        if (!QueryExclusiveBufferFrames(kRate, kBits, kCh, bufFrames) ||
+            bufFrames == 0) {
+            printf("SKIP: misaligned-tail test "
+                   "(no compatible exclusive-mode audio device)\n");
+        } else {
+            printf("[info] Test22 exclusive buffer=%u frames\n", bufFrames);
+            uint32_t tail = bufFrames / 2;
+            if (tail == 0) {
+                tail = 1;
+            }
+            const uint32_t total = bufFrames * 2 + tail;
+            // Confirm misalignment rather than assuming a size.
+            CHECK(total % bufFrames != 0,
+                  "Fixture length is NOT a multiple of buffer size");
+            printf("[info] Test22 misaligned fixture total=%u "
+                   "(total%%buf=%u)\n",
+                   total, total % bufFrames);
+
+            // WAV case: misaligned length plays to natural EOS.
+            {
+                std::wstring wavPath = CreateTempWav(
+                    L"\\kessoku_test_player22_wav_", kRate, kBits, kCh,
+                    total);
+                CHECK(!wavPath.empty(),
+                      "Create misaligned WAV fixture");
+
+                if (!wavPath.empty()) {
+                    auto result = kessoku::audio::Player::Create(wavPath);
+                    if (result.IsErr() &&
+                        IsEnvironmentSkipCode(result.GetError().code)) {
+                        printf("SKIP: misaligned-WAV test "
+                               "(no compatible exclusive-mode audio device)\n");
+                    } else {
+                        CHECK(result.IsOk(),
+                              "Player::Create for misaligned WAV test");
+                    }
+
+                    if (result.IsOk()) {
+                        auto player = std::move(result.Value());
+
+                        CHECK(player.Play().IsOk(),
+                              "Play() succeeds for misaligned WAV");
+
+                        bool finished = false;
+                        for (int i = 0; i < 100; ++i) {
+                            if (player.GetState() ==
+                                kessoku::audio::PlaybackState::Stopped) {
+                                finished = true;
+                                break;
+                            }
+                            Sleep(50);
+                        }
+                        CHECK(finished,
+                              "Misaligned WAV finishes naturally to Stopped");
+                        CHECK(player.GetPosition() == total,
+                              "Misaligned WAV position reaches total");
+
+                        player.Stop();
+                    }
+
+                    CleanupTempWav(wavPath);
+                }
+            }
+
+            // FLAC case: same misaligned length, decoded path.
+            {
+                std::wstring flacPath = CreateTempFlac(
+                    L"\\kessoku_test_player22_flac_", kRate, kBits, kCh,
+                    total);
+                CHECK(!flacPath.empty(),
+                      "Create misaligned FLAC fixture");
+
+                if (!flacPath.empty()) {
+                    auto result = kessoku::audio::Player::Create(flacPath);
+                    if (result.IsErr() &&
+                        IsEnvironmentSkipCode(result.GetError().code)) {
+                        printf("SKIP: misaligned-FLAC test "
+                               "(no compatible exclusive-mode audio device)\n");
+                    } else {
+                        CHECK(result.IsOk(),
+                              "Player::Create for misaligned FLAC test");
+                    }
+
+                    if (result.IsOk()) {
+                        auto player = std::move(result.Value());
+
+                        CHECK(player.Play().IsOk(),
+                              "Play() succeeds for misaligned FLAC");
+
+                        bool finished = false;
+                        for (int i = 0; i < 100; ++i) {
+                            if (player.GetState() ==
+                                kessoku::audio::PlaybackState::Stopped) {
+                                finished = true;
+                                break;
+                            }
+                            Sleep(50);
+                        }
+                        CHECK(finished,
+                              "Misaligned FLAC finishes naturally to Stopped");
+                        CHECK(player.GetPosition() == total,
+                              "Misaligned FLAC position reaches total");
+
+                        player.Stop();
+                    }
+
+                    CleanupTempFlac(flacPath);
+                }
+            }
         }
     }
 

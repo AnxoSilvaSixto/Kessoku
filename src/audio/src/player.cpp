@@ -121,6 +121,9 @@ WAVEFORMATEXTENSIBLE BuildWavExtensible(const kessoku::audio::WavFormat& fmt) {
 }
 
 // Find the 'data' chunk in a WAV file and return its offset and size.
+// Also rejects a header overstating its data: the declared data range
+// must fit inside the actual file, otherwise the file is truncated and
+// this returns false so Create() fails cleanly before any audio setup.
 bool FindDataChunk(const std::wstring& path, uint64_t& outOffset, uint64_t& outSize) {
     HANDLE hFile = CreateFileW(
         path.c_str(), GENERIC_READ, FILE_SHARE_READ,
@@ -166,6 +169,19 @@ bool FindDataChunk(const std::wstring& path, uint64_t& outOffset, uint64_t& outS
         }
 
         if (std::memcmp(chunkId, "data", 4) == 0) {
+            // The declared data range must fit inside the actual file.
+            // A header overstating its data means a truncated file; reject
+            // it here (same open handle, no extra opens) so Create() fails
+            // cleanly. Reads past real EOF return success with 0 bytes, so
+            // this cannot be detected reliably at playback time.
+            const uint64_t dataEnd =
+                static_cast<uint64_t>(pos.QuadPart + 8) + chunkSize;
+            LARGE_INTEGER fileSize{};
+            if (!GetFileSizeEx(hFile, &fileSize) ||
+                dataEnd > static_cast<uint64_t>(fileSize.QuadPart)) {
+                CloseHandle(hFile);
+                return false;
+            }
             outOffset = static_cast<uint64_t>(pos.QuadPart + 8);
             outSize = chunkSize;
             CloseHandle(hFile);
@@ -283,6 +299,23 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
                 core::ErrorCode::FormatNotSupported,
                 "WAV channel count not supported in exclusive mode");
         }
+    }
+
+    // Validate the WAV data chunk before touching audio hardware: an
+    // overstated header (truncated file) fails here with a clean error
+    // instead of hanging or failing mid-playback. FindDataChunk already
+    // rejects a declared range extending beyond the actual file size.
+    uint32_t bytesPerFrame =
+        fileFormat.channelCount * (fileFormat.bitsPerSample / 8);
+    if (!isFlac) {
+        if (!FindDataChunk(std::wstring(wavPath), dataChunkOffset,
+                           dataChunkSize)) {
+            return core::Result<Player>::Err(
+                core::ErrorCode::AudioInitFailed,
+                "Invalid WAV data chunk (not found or extends beyond end "
+                "of file)");
+        }
+        totalFrames = static_cast<uint32_t>(dataChunkSize / bytesPerFrame);
     }
 
     HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -515,26 +548,9 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
             "Could not get IAudioRenderClient");
     }
 
-    // Find data chunk offset and size (WAV only; FLAC total frames come
-    // from STREAMINFO and decoding starts at the stream head).
-    uint32_t bytesPerFrame =
-        fileFormat.channelCount * (fileFormat.bitsPerSample / 8);
-    if (!isFlac) {
-        if (!FindDataChunk(std::wstring(wavPath), dataChunkOffset,
-                           dataChunkSize)) {
-            pRenderClient->Release();
-            CloseHandle(hEvent);
-            pAudioClient->Release();
-            pDevice->Release();
-            pEnumerator->Release();
-            CoUninitialize();
-            return core::Result<Player>::Err(
-                core::ErrorCode::AudioInitFailed,
-                "Could not find data chunk in WAV file");
-        }
-        totalFrames = static_cast<uint32_t>(dataChunkSize / bytesPerFrame);
-    }
-
+    // Data chunk offset/size (WAV) were validated above, before any audio
+    // setup; FLAC total frames come from STREAMINFO and decoding starts at
+    // the stream head.
     Player player(std::wstring(wavPath), fileFormat, totalFrames, sourceKind,
                   flacFormat);
     player.pEnumerator_ = pEnumerator;
