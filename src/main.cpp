@@ -13,6 +13,8 @@
 
 #include <shobjidl_core.h>
 
+#include "transport_position.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <optional>
@@ -31,10 +33,8 @@ static constexpr UINT WM_SCAN_COMPLETE = WM_APP + 1;
 static constexpr UINT_PTR kPositionTimerId = 1;
 static constexpr UINT kPositionTimerMs = 250;
 
-// Seek bar granularity: the bar spans 0..kSeekScale and maps linearly onto
-// 0..totalFrames. Keeps the control in int range no matter how long the
-// track is (totalFrames is uint32_t and can exceed INT_MAX in theory).
-static constexpr int kSeekScale = 1000;
+// Height of the bottom transport strip (button, labels, seek bar).
+// The seek bar range itself (kSeekScale) lives in transport_position.h.
 static constexpr int kTransportStripHeight = 84;
 
 enum ControlIds {
@@ -50,18 +50,8 @@ struct ScanResultData {
 
 namespace {
 
-std::wstring FormatTrackTime(uint32_t frames, uint32_t sampleRate)
-{
-    uint64_t totalSeconds = (sampleRate != 0) ? (frames / sampleRate) : 0;
-    uint64_t minutes = totalSeconds / 60;
-    uint64_t seconds = totalSeconds % 60;
-    std::wstring text = std::to_wstring(minutes) + L":";
-    if (seconds < 10) {
-        text += L"0";
-    }
-    text += std::to_wstring(seconds);
-    return text;
-}
+// Window-local helpers. Position/seek/time mapping lives in
+// transport_position.h so it is unit-testable without a window.
 
 std::wstring WidenErrorMessage(const std::string& narrow)
 {
@@ -120,7 +110,7 @@ public:
         m_seekBar.Create(*this, emptyRect, nullptr,
             WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_AUTOTICKS,
             0, IDC_SEEK_BAR);
-        m_seekBar.SetRange(0, kSeekScale);
+        m_seekBar.SetRange(0, kessoku::ui::kSeekScale);
         m_seekBar.SetPos(0);
         // No Player yet, and Seek() rejects Stopped anyway: keep the bar
         // disabled until a track is actually playing or paused.
@@ -478,15 +468,7 @@ private:
         if (total == 0) {
             return;
         }
-        if (barPos < 0) {
-            barPos = 0;
-        }
-        if (barPos > kSeekScale) {
-            barPos = kSeekScale;
-        }
-        uint32_t frame = static_cast<uint32_t>(
-            (static_cast<uint64_t>(barPos) * total) /
-            static_cast<uint64_t>(kSeekScale));
+        uint32_t frame = kessoku::ui::BarToFrame(barPos, total);
         auto status = m_player->Seek(frame);
         if (status.IsErr()) {
             m_statusLabel.SetWindowTextW(L"Seek failed.");
@@ -519,15 +501,10 @@ private:
         uint32_t position = m_player->GetPosition();
         uint32_t total = m_player->GetTotalFrames();
         uint32_t rate = m_player->GetSampleRate();
-        std::wstring text = FormatTrackTime(position, rate) + L" / " +
-            FormatTrackTime(total, rate);
+        std::wstring text = kessoku::ui::FormatTrackTime(position, rate) + L" / " +
+            kessoku::ui::FormatTrackTime(total, rate);
         m_positionLabel.SetWindowTextW(text.c_str());
-        int barPos = 0;
-        if (total != 0) {
-            barPos = static_cast<int>(
-                (static_cast<uint64_t>(position) * kSeekScale) / total);
-        }
-        m_seekBar.SetPos(barPos);
+        m_seekBar.SetPos(kessoku::ui::PositionToBar(position, total));
     }
 
     void ResetPositionUI()

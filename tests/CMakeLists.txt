@@ -103,3 +103,22 @@ target_compile_definitions(player_tests PRIVATE
 add_test(NAME player_tests COMMAND player_tests)
 
 kessoku_copy_asan_runtime(player_tests)
+
+add_executable(transport_position_tests
+    ui/transport_position_tests.cpp
+)
+
+target_include_directories(transport_position_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_compile_options(transport_position_tests PRIVATE /W4)
+
+target_compile_definitions(transport_position_tests PRIVATE
+    _UNICODE
+    UNICODE
+)
+
+add_test(NAME transport_position_tests COMMAND transport_position_tests)
+
+kessoku_copy_asan_runtime(transport_position_tests)
