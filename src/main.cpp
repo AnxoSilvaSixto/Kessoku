@@ -266,6 +266,11 @@ public:
         m_listView.SetItemText(row, 3, L"");
     }
 
+    void SetLibraryRoot(kessoku::core::LibraryRoot root)
+    {
+        m_libraryRoot.emplace(std::move(root));
+    }
+
 private:
     void LayoutChildren(int cx, int cy)
     {
@@ -303,6 +308,20 @@ private:
         // keeps it from ever reaching Player::Create.
         if (index >= m_entries.size()) {
             m_statusLabel.SetWindowTextW(L"No track selected.");
+            return;
+        }
+
+        // Play-time containment: the path resolved inside the library root
+        // at scan time, but the filesystem may have changed since (a
+        // junction or symlink swapped in after the scan resolves outside).
+        // Re-resolve immediately before opening. Contains() fails closed on
+        // missing files too, so the message must not claim which case
+        // refused the track.
+        if (!m_libraryRoot.has_value() ||
+            !m_libraryRoot->Contains(m_entries[index].first.native())) {
+            ::MessageBoxW(m_hWnd, L"The selected track cannot be played.",
+                        L"Playback error", MB_OK | MB_ICONERROR);
+            m_statusLabel.SetWindowTextW(L"Could not play selected track.");
             return;
         }
 
@@ -532,6 +551,12 @@ private:
     // exclusively on this window's UI thread.
     std::optional<kessoku::audio::Player> m_player;
 
+    // The validated library root from the successful folder pick. PlaySelected
+    // re-checks containment against it immediately before Player::Create(),
+    // so a path that escaped the root after the scan (junction/symlink swap,
+    // deletion) is refused instead of opened.
+    std::optional<kessoku::core::LibraryRoot> m_libraryRoot;
+
     // True between TB_THUMBTRACK and TB_ENDTRACK: PollPlayer skips
     // programmatic bar updates so the timer doesn't fight the drag.
     bool m_scrubbing = false;
@@ -663,6 +688,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
             MessageBoxA(win.m_hWnd, err.message.c_str(), "Library root error", MB_OK | MB_ICONERROR);
             continue; // Re-prompt
         }
+
+        // Keep the validated root in the window: PlaySelected() re-checks
+        // containment against it immediately before Player::Create().
+        win.SetLibraryRoot(std::move(rootResult.Value()));
 
         std::thread scanThread(RunScanAndPost, win.m_hWnd, folder);
         scanThread.detach();
