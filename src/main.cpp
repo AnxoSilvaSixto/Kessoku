@@ -199,15 +199,13 @@ public:
             return 0;
         }
         int scrollCode = LOWORD(wParam);
-        int barPos = 0;
         switch (scrollCode) {
         case TB_THUMBTRACK:
             // Hold programmatic updates until the drag finishes so the timer
             // doesn't fight the thumb. Only TB_THUMBTRACK carries the drag
             // position in HIWORD; every other code must use GetPos().
             m_scrubbing = true;
-            barPos = static_cast<int>(HIWORD(wParam));
-            SeekFromBar(barPos);
+            SeekFromBar(static_cast<int>(HIWORD(wParam)));
             break;
         case TB_ENDTRACK:
             SeekFromBar(m_seekBar.GetPos());
@@ -314,6 +312,7 @@ private:
         // The empty-state placeholder row has no backing entry; bounds-check
         // keeps it from ever reaching Player::Create.
         if (index >= m_entries.size()) {
+            m_statusLabel.SetWindowTextW(L"No track selected.");
             return;
         }
 
