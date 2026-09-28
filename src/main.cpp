@@ -678,7 +678,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
     while (true) {
         std::wstring folder = PickFolder(win.m_hWnd);
         if (folder.empty()) {
-            // Cancel or error — exit cleanly
+            // Cancel or picker failure: destroy the window and exit 0
+            // through the normal teardown (WM_DESTROY posts the quit
+            // message that ends the loop below). A bad folder still
+            // re-prompts; only the empty pick exits.
+            win.DestroyWindow();
             break;
         }
 
