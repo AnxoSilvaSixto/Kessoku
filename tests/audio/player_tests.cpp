@@ -1596,6 +1596,118 @@ int main() {
         }
     }
 
+    // --- Test 23: WAV Seek while Paused preserves Paused (no auto-resume) ---
+    {
+        std::wstring wavPath = CreateTempWav(
+            L"\\kessoku_test_player23_", 44100, 16, 2, 44100);
+        CHECK(!wavPath.empty(), "Create temp WAV for paused-seek test");
+
+        if (!wavPath.empty()) {
+            auto result = kessoku::audio::Player::Create(wavPath);
+            if (result.IsErr() &&
+                IsEnvironmentSkipCode(result.GetError().code)) {
+                printf("SKIP: WAV paused-seek test "
+                       "(no compatible exclusive-mode audio device)\n");
+            } else {
+                CHECK(result.IsOk(),
+                      "Player::Create for WAV paused-seek test");
+            }
+
+            if (result.IsOk()) {
+                auto player = std::move(result.Value());
+
+                CHECK(player.Play().IsOk(), "Play() succeeds");
+                Sleep(100);
+                CHECK(player.Pause().IsOk(), "Pause() succeeds");
+                CHECK(player.GetState() ==
+                          kessoku::audio::PlaybackState::Paused,
+                      "State is Paused before Seek()");
+
+                auto seekStatus = player.Seek(10000);
+                CHECK(seekStatus.IsOk(), "Seek() while Paused succeeds");
+                CHECK(player.GetPosition() == 10000,
+                      "Position is 10000 after paused Seek(10000)");
+                CHECK(player.GetState() ==
+                          kessoku::audio::PlaybackState::Paused,
+                      "State stays Paused after Seek() (no auto-resume)");
+
+                // Seek while Playing keeps playing (unchanged behavior).
+                CHECK(player.Resume().IsOk() ||
+                          player.GetState() ==
+                              kessoku::audio::PlaybackState::Playing,
+                      "Back to Playing for the second half");
+                if (player.GetState() ==
+                    kessoku::audio::PlaybackState::Paused) {
+                    player.Resume();
+                }
+                auto seekPlaying = player.Seek(20000);
+                CHECK(seekPlaying.IsOk(), "Seek() while Playing succeeds");
+                CHECK(player.GetState() ==
+                          kessoku::audio::PlaybackState::Playing,
+                      "State stays Playing after Seek() while Playing");
+                CHECK(player.GetPosition() == 20000,
+                      "Position is 20000 after Seek(20000)");
+
+                player.Stop();
+            }
+
+            CleanupTempWav(wavPath);
+        }
+    }
+
+    // --- Test 24: FLAC Seek while Paused preserves Paused (no auto-resume) ---
+    {
+        std::wstring flacPath = CreateTempFlac(
+            L"\\kessoku_test_flac24_", 44100, 16, 2, 44100);
+        CHECK(!flacPath.empty(), "Create temp FLAC for paused-seek test");
+
+        if (!flacPath.empty()) {
+            auto result = kessoku::audio::Player::Create(flacPath);
+            if (result.IsErr() &&
+                IsEnvironmentSkipCode(result.GetError().code)) {
+                printf("SKIP: FLAC paused-seek test "
+                       "(no compatible exclusive-mode audio device)\n");
+            } else {
+                CHECK(result.IsOk(),
+                      "Player::Create for FLAC paused-seek test");
+            }
+
+            if (result.IsOk()) {
+                auto player = std::move(result.Value());
+
+                CHECK(player.Play().IsOk(), "FLAC Play() succeeds");
+                Sleep(100);
+                CHECK(player.Pause().IsOk(), "FLAC Pause() succeeds");
+                CHECK(player.GetState() ==
+                          kessoku::audio::PlaybackState::Paused,
+                      "FLAC state is Paused before Seek()");
+
+                auto seekStatus = player.Seek(10000);
+                CHECK(seekStatus.IsOk(), "FLAC Seek() while Paused succeeds");
+                CHECK(player.GetPosition() == 10000,
+                      "FLAC position is 10000 after paused Seek(10000)");
+                CHECK(player.GetState() ==
+                          kessoku::audio::PlaybackState::Paused,
+                      "FLAC state stays Paused after Seek()");
+
+                if (player.GetState() ==
+                    kessoku::audio::PlaybackState::Paused) {
+                    player.Resume();
+                }
+                auto seekPlaying = player.Seek(20000);
+                CHECK(seekPlaying.IsOk(),
+                      "FLAC Seek() while Playing succeeds");
+                CHECK(player.GetState() ==
+                          kessoku::audio::PlaybackState::Playing,
+                      "FLAC state stays Playing after Seek() while Playing");
+
+                player.Stop();
+            }
+
+            CleanupTempFlac(flacPath);
+        }
+    }
+
     std::wprintf(L"\n=== Results: %d failures ===\n", gFailures);
     return gFailures;
 }

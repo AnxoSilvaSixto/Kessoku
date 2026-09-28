@@ -681,8 +681,13 @@ core::Status Player::Seek(uint32_t frameOffset) {
         // hold positionMutex_ so a concurrent RenderIteration (which holds
         // the same mutex across its decode + currentFrame_ update) cannot
         // interleave and clobber the seek with a stale read-modify-write.
-        // Lock order is always positionMutex_ -> FlacReader.
-        Pause();
+        // Lock order is always positionMutex_ -> FlacReader. While Paused
+        // the render thread only polls (it never decodes), so repositioning
+        // needs no Pause()/Resume() pair and the state stays Paused.
+        const bool wasPaused = (state_.load() == PlaybackState::Paused);
+        if (!wasPaused) {
+            Pause();
+        }
         {
             std::lock_guard<std::mutex> lock(positionMutex_);
             currentFrame_ = frameOffset;
@@ -694,7 +699,9 @@ core::Status Player::Seek(uint32_t frameOffset) {
                     "FLAC seek failed");
             }
         }
-        Resume();
+        if (!wasPaused) {
+            Resume();
+        }
 
         return core::Result<void>::Ok();
     }
@@ -704,7 +711,12 @@ core::Status Player::Seek(uint32_t frameOffset) {
     // Pause, reposition, resume (same serialization as FLAC above).
     // Repositions the file handle as well: filePosition_ alone is not
     // enough because ReadFrames reads sequentially from the handle.
-    Pause();
+    // Same Paused shortcut as FLAC: the render thread is polling, not
+    // reading, so skip Pause()/Resume() and stay Paused.
+    const bool wasPaused = (state_.load() == PlaybackState::Paused);
+    if (!wasPaused) {
+        Pause();
+    }
     {
         std::lock_guard<std::mutex> lock(positionMutex_);
         currentFrame_ = frameOffset;
@@ -716,7 +728,9 @@ core::Status Player::Seek(uint32_t frameOffset) {
             SetFilePointerEx(hFile_, pos, nullptr, FILE_BEGIN);
         }
     }
-    Resume();
+    if (!wasPaused) {
+        Resume();
+    }
 
     return core::Result<void>::Ok();
 }
