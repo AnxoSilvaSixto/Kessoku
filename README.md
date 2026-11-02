@@ -27,6 +27,10 @@ ctest --preset default
 The executable lands in `build\Debug\Kessoku.exe`. Run it from
 `build\Debug` so the vcpkg-deployed DLLs resolve.
 
+`player_tests` opens the default output device in WASAPI Exclusive Mode. Run
+one audio test suite at a time: two `ctest` invocations in parallel (for
+example, Debug and Release) contend for the same endpoint and one will fail.
+
 ### Presets
 
 | Preset | Purpose |
