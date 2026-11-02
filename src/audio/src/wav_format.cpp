@@ -1,5 +1,7 @@
 #include "kessoku/audio/wav_format.h"
 
+#include "kessoku/core/utf8.h"
+
 #include <windows.h>
 
 #include <cstring>
@@ -38,16 +40,7 @@ struct FmtChunkHeader {
 std::string ParseWavFormat(const std::wstring& path, WavFormat& out) {
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
-        int required = WideCharToMultiByte(CP_UTF8, 0, path.data(),
-                                           static_cast<int>(path.size()),
-                                           nullptr, 0, nullptr, nullptr);
-        std::string utf8Path(static_cast<size_t>(required), '\0');
-        if (required > 0) {
-            WideCharToMultiByte(CP_UTF8, 0, path.data(),
-                                static_cast<int>(path.size()),
-                                utf8Path.data(), required, nullptr, nullptr);
-        }
-        return "Could not open WAV file: " + utf8Path;
+        return "Could not open WAV file: " + core::WideToUtf8(path);
     }
 
     RiffHeader riffHeader;
@@ -85,11 +78,21 @@ std::string ParseWavFormat(const std::wstring& path, WavFormat& out) {
 
             // Only support PCM (audioFormat == 1)
             if (fmt->audioFormat != 1) {
-                char buf[32];
+                // snprintf returns the length it *would* have written. Cap it
+                // at what actually fit in the buffer before constructing the
+                // string, otherwise the message reads past buf.
+                char buf[128];
                 int len = snprintf(buf, sizeof(buf),
                     "WAV file uses non-PCM format (0x%x); only PCM is supported",
                     fmt->audioFormat);
-                return std::string(buf, len > 0 ? len : 0);
+                if (len < 0) {
+                    return "WAV file uses non-PCM format; only PCM is supported";
+                }
+                const size_t written =
+                    static_cast<size_t>(len) < sizeof(buf)
+                        ? static_cast<size_t>(len)
+                        : sizeof(buf) - 1;
+                return std::string(buf, written);
             }
 
             out.sampleRate = fmt->sampleRate;

@@ -1,6 +1,7 @@
 #include "kessoku/library/metadata.h"
 
 #include "kessoku/core/error.h"
+#include "kessoku/core/utf8.h"
 
 #include <taglib/fileref.h>
 #include <taglib/flacfile.h>
@@ -45,7 +46,8 @@ core::Result<TrackMetadata> ReadTrackMetadata(const std::filesystem::path& fileP
     if (ref.isNull()) {
         return core::Result<TrackMetadata>::Err(
             core::ErrorCode::UnknownError,
-            "Could not open or parse file: " + filePath.string()
+            "Could not open or parse file: " +
+                core::WideToUtf8(filePath.wstring())
         );
     }
 
@@ -74,7 +76,8 @@ core::Result<TrackMetadata> ReadTrackMetadata(const std::filesystem::path& fileP
         if (!wavFile || !wavFile->isValid()) {
             return core::Result<TrackMetadata>::Err(
                 core::ErrorCode::UnknownError,
-                "Could not open or parse file: " + filePath.string()
+                "Could not open or parse file: " +
+                    core::WideToUtf8(filePath.wstring())
             );
         }
 

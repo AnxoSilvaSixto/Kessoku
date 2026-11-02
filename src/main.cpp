@@ -8,6 +8,7 @@
 #include <taglib/tstring.h>
 #include <kessoku/audio/player.h>
 #include <kessoku/core/library_root.h>
+#include <kessoku/core/utf8.h>
 #include <kessoku/library/scanner.h>
 #include <kessoku/library/metadata.h>
 
@@ -55,19 +56,10 @@ namespace {
 
 std::wstring WidenErrorMessage(const std::string& narrow)
 {
-    if (narrow.empty()) {
+    std::wstring wide = kessoku::core::Utf8ToWide(narrow);
+    if (wide.empty()) {
         return L"Unknown error";
     }
-    int needed = MultiByteToWideChar(CP_UTF8, 0, narrow.c_str(),
-                                     static_cast<int>(narrow.size()),
-                                     nullptr, 0);
-    if (needed <= 0) {
-        return L"Unknown error";
-    }
-    std::wstring wide(static_cast<size_t>(needed), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, narrow.c_str(),
-                        static_cast<int>(narrow.size()),
-                        wide.data(), needed);
     return wide;
 }
 
@@ -136,7 +128,8 @@ public:
         // legal here. Release the exclusive stream before exiting.
         KillTimer(kPositionTimerId);
         if (m_player.has_value()) {
-            m_player->Stop();
+            // Cleanup path: no UI left to report a Stop() failure to.
+            (void)m_player->Stop();
             m_player.reset();
         }
         PostQuitMessage(0);
@@ -348,7 +341,7 @@ private:
             const auto& err = playStatus.GetError();
             ::MessageBoxW(m_hWnd, WidenErrorMessage(err.message).c_str(),
                         L"Playback error", MB_OK | MB_ICONERROR);
-            m_player->Stop();
+            (void)m_player->Stop();
             m_player.reset();
             m_statusLabel.SetWindowTextW(L"Could not play selected track.");
             return;
@@ -431,7 +424,7 @@ private:
             // now rather than holding it while idle, and reset the position
             // display to the start (Stop() zeroes the frame counter).
             m_statusLabel.SetWindowTextW(L"Finished");
-            m_player->Stop();
+            (void)m_player->Stop();
             m_player.reset();
             KillTimer(kPositionTimerId);
             ResetPositionUI();
@@ -453,7 +446,7 @@ private:
         // No re-enumeration/reactivation: explicitly deferred, out of scope.
         KillTimer(kPositionTimerId);
         if (m_player.has_value()) {
-            m_player->Stop();
+            (void)m_player->Stop();
             m_player.reset();
         }
         m_scrubbing = false;
@@ -465,7 +458,7 @@ private:
     void StopTrack()
     {
         if (m_player.has_value()) {
-            m_player->Stop();
+            (void)m_player->Stop();
             m_player.reset();
         }
         KillTimer(kPositionTimerId);
@@ -623,11 +616,8 @@ void RunScanAndPost(HWND hWnd, const std::wstring& folderPath)
         OutputDebugStringA("Kessoku: scan skipped: ");
         OutputDebugStringA(skipped.reason.c_str());
         OutputDebugStringA(" - ");
-        std::string utf8;
-        utf8.reserve(skipped.path.wstring().size() * 3);
-        for (wchar_t c : skipped.path.wstring()) {
-            utf8 += static_cast<char>(c & 0xFF);
-        }
+        const std::string utf8 = kessoku::core::WideToUtf8(
+            skipped.path.wstring());
         OutputDebugStringA(utf8.c_str());
         OutputDebugStringA("\n");
     }

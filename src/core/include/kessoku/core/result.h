@@ -1,6 +1,7 @@
 #pragma once
 
 #include "kessoku/core/error.h"
+#include <cstddef>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -21,34 +22,34 @@ void DestroyValue(void* ptr, bool is_ok) {
 } // namespace detail
 
 template <typename T>
-class Result {
+class [[nodiscard]] Result {
 public:
-    static Result Ok(T&& value) {
+    [[nodiscard]] static Result Ok(T&& value) {
         Result r;
         new (&r.storage_[0]) T(std::move(value));
         r.is_ok_ = true;
         return r;
     }
 
-    static Result Err(ErrorCode code, std::string_view message) {
+    [[nodiscard]] static Result Err(ErrorCode code, std::string_view message) {
         Result r;
         new (&r.storage_[0]) Error{code, std::string{message}};
         r.is_ok_ = false;
         return r;
     }
 
-    bool IsOk() const noexcept { return is_ok_; }
-    bool IsErr() const noexcept { return !is_ok_; }
+    [[nodiscard]] bool IsOk() const noexcept { return is_ok_; }
+    [[nodiscard]] bool IsErr() const noexcept { return !is_ok_; }
 
-    const T& Value() const {
+    [[nodiscard]] const T& Value() const {
         return *reinterpret_cast<const T*>(&storage_[0]);
     }
 
-    T& Value() {
+    [[nodiscard]] T& Value() {
         return *reinterpret_cast<T*>(&storage_[0]);
     }
 
-    const Error& GetError() const {
+    [[nodiscard]] const Error& GetError() const {
         return *reinterpret_cast<const Error*>(&storage_[0]);
     }
 
@@ -87,25 +88,25 @@ private:
 using Status = Result<void>;
 
 template <>
-class Result<void> {
+class [[nodiscard]] Result<void> {
 public:
-    static Result<void> Ok() {
+    [[nodiscard]] static Result<void> Ok() {
         Result<void> r;
         r.is_ok_ = true;
         return r;
     }
 
-    static Result<void> Err(ErrorCode code, std::string_view message) {
+    [[nodiscard]] static Result<void> Err(ErrorCode code, std::string_view message) {
         Result<void> r;
         new (&r.storage_[0]) Error{code, std::string{message}};
         r.is_ok_ = false;
         return r;
     }
 
-    bool IsOk() const noexcept { return is_ok_; }
-    bool IsErr() const noexcept { return !is_ok_; }
+    [[nodiscard]] bool IsOk() const noexcept { return is_ok_; }
+    [[nodiscard]] bool IsErr() const noexcept { return !is_ok_; }
 
-    const Error& GetError() const {
+    [[nodiscard]] const Error& GetError() const {
         return *reinterpret_cast<const Error*>(&storage_[0]);
     }
 

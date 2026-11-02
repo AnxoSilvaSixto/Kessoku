@@ -1,5 +1,7 @@
 #include "kessoku/audio/flac_format.h"
 
+#include "kessoku/core/utf8.h"
+
 #define NOMINMAX
 #include <windows.h>
 
@@ -16,21 +18,12 @@ namespace {
 // libFLAC on Windows expects a UTF-8 filename and converts to _wfopen
 // internally (see FLAC/metadata.h and FLAC/stream_decoder.h docs).
 // Returns empty string on success.
-std::string WideToUtf8(const std::wstring& path, std::string& out) {
+std::string WideToUtf8Path(const std::wstring& path, std::string& out) {
     if (path.empty()) {
         return "Empty path";
     }
-    int required = WideCharToMultiByte(CP_UTF8, 0, path.data(),
-                                       static_cast<int>(path.size()),
-                                       nullptr, 0, nullptr, nullptr);
-    if (required <= 0) {
-        return "Could not convert path to UTF-8";
-    }
-    out.assign(static_cast<size_t>(required), '\0');
-    int written = WideCharToMultiByte(CP_UTF8, 0, path.data(),
-                                      static_cast<int>(path.size()),
-                                      out.data(), required, nullptr, nullptr);
-    if (written != required) {
+    out = core::WideToUtf8(path);
+    if (out.empty()) {
         return "Could not convert path to UTF-8";
     }
     return {};
@@ -62,7 +55,7 @@ void FlacErrorCallback(const FLAC__StreamDecoder* /*decoder*/,
 
 std::string ParseFlacFormat(const std::wstring& path, FlacFormat& out) {
     std::string utf8Path;
-    std::string convError = WideToUtf8(path, utf8Path);
+    std::string convError = WideToUtf8Path(path, utf8Path);
     if (!convError.empty()) {
         return convError;
     }
@@ -184,7 +177,7 @@ std::string FlacReader::Open(const std::wstring& path, const FlacFormat& fmt,
     bytesPerFrame_ = fmt.channelCount * (fmt.bitsPerSample / 8);
 
     std::string utf8Path;
-    std::string convError = WideToUtf8(path, utf8Path);
+    std::string convError = WideToUtf8Path(path, utf8Path);
     if (!convError.empty()) {
         return convError;
     }

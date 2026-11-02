@@ -1,5 +1,7 @@
 #include "kessoku/library/scanner.h"
 
+#include "kessoku/core/utf8.h"
+
 #include <windows.h>
 
 #include <array>
@@ -57,17 +59,12 @@ std::wstring GetErrorDescription(DWORD gle) {
     return msg;
 }
 
-std::string WstringToUtf8(std::wstring_view wstr) {
-    if (wstr.empty()) return {};
-    int needed = WideCharToMultiByte(
-        CP_UTF8, 0, wstr.data(), static_cast<int>(wstr.size()),
-        nullptr, 0, nullptr, nullptr);
-    if (needed == 0) return {};
-    std::string result(needed, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, wstr.data(),
-                        static_cast<int>(wstr.size()),
-                        result.data(), needed, nullptr, nullptr);
-    return result;
+// std::filesystem reports failures through std::error_code, which carries the
+// Win32 error value in ec.value(). GetLastError() is unrelated at that point
+// and must not be consulted.
+std::string DescribeErrorCode(const std::error_code& ec) {
+    return core::WideToUtf8(
+        GetErrorDescription(static_cast<DWORD>(ec.value())));
 }
 
 void ScanDirectory(
@@ -79,8 +76,7 @@ void ScanDirectory(
     std::error_code ec;
     auto it = std::filesystem::directory_iterator(dir, ec);
     if (ec) {
-        DWORD gle = GetLastError();
-        skipped.push_back({dir, WstringToUtf8(GetErrorDescription(gle))});
+        skipped.push_back({dir, DescribeErrorCode(ec)});
         return;
     }
 
@@ -88,17 +84,13 @@ void ScanDirectory(
         std::error_code entryEc;
         bool isDir = entry.is_directory(entryEc);
         if (entryEc) {
-            DWORD gle = GetLastError();
-            skipped.push_back({entry.path(),
-                WstringToUtf8(GetErrorDescription(gle))});
+            skipped.push_back({entry.path(), DescribeErrorCode(entryEc)});
             continue;
         }
         entryEc.clear();
         bool isFile = entry.is_regular_file(entryEc);
         if (entryEc) {
-            DWORD gle = GetLastError();
-            skipped.push_back({entry.path(),
-                WstringToUtf8(GetErrorDescription(gle))});
+            skipped.push_back({entry.path(), DescribeErrorCode(entryEc)});
             continue;
         }
 
