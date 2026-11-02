@@ -39,6 +39,22 @@ The executable lands in `build\Debug\Kessoku.exe`. Run it from
 `scripts\setup-ninja-env.bat` initializes the MSVC environment, configures the
 Ninja preset, builds it, and leaves `compile_commands.json` ready for clangd.
 
+### Static analysis
+
+`clang-tidy` is advisory, not a build gate. Generate the Ninja compile
+database once, then analyze individual translation units:
+
+```powershell
+scripts\setup-ninja-env.bat
+clang-tidy -p build\ninja src\main.cpp
+```
+
+Add LLVM's `bin` directory to `PATH` if `clang-tidy` is not found. `.clang-tidy`
+enables the analyzer plus the bugprone, modernize, performance, and readability
+families; checks that conflict with Win32 APIs or established project style are
+disabled so real findings stay visible. Prefer analyzing changed files over the
+whole tree.
+
 ## Layout
 
 ```
