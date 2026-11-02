@@ -1,50 +1,75 @@
 ---
+# Advisory profile. Findings are reviewed by hand; nothing here is a build gate.
+#
+# The disabled checks fall into two groups:
+#   1. Deliberate style choices in this codebase (braceless one-line guards,
+#      mixed m_/suffix member naming, explicit 32-bit enums, C arrays required
+#      by Win32 APIs, *_TOKEN macros from Windows headers).
+#   2. Checks whose defaults do not model Win32 ownership or placement-new
+#      storage, so they only produce false positives here.
 Checks: >
   bugprone-*,
+  clang-analyzer-*,
   cppcoreguidelines-*,
   modernize-*,
   performance-*,
   readability-*,
+
   -bugprone-easily-swappable-parameters,
+  -bugprone-exception-escape,
+  -bugprone-reserved-identifier,
+  -bugprone-suspicious-stringview-data-usage,
+  -bugprone-throwing-static-initialization,
+
+  -clang-diagnostic-unused-command-line-argument,
+  -clang-analyzer-optin.core.EnumCastOutOfRange,
+
+  -cppcoreguidelines-avoid-c-arrays,
   -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-avoid-non-const-global-variables,
+  -cppcoreguidelines-macro-usage,
+  -cppcoreguidelines-owning-memory,
+  -cppcoreguidelines-prefer-member-initializer,
   -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
   -cppcoreguidelines-pro-bounds-pointer-arithmetic,
   -cppcoreguidelines-pro-type-const-cast,
+  -cppcoreguidelines-pro-type-member-init,
   -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-pro-type-union-access,
   -cppcoreguidelines-pro-type-vararg,
+  -cppcoreguidelines-use-enum-class,
+
   -modernize-avoid-c-arrays,
+  -modernize-return-braced-init-list,
+  -modernize-use-auto,
+  -modernize-use-designated-initializers,
+  -modernize-use-integer-sign-comparison,
+  -modernize-use-nodiscard,
+  -modernize-use-ranges,
+  -modernize-use-scoped-lock,
+  -modernize-use-string-view,
   -modernize-use-trailing-return-type,
+
+  -performance-enum-size,
+  -performance-no-int-to-ptr,
+
+  -readability-braces-around-statements,
   -readability-function-cognitive-complexity,
   -readability-identifier-length,
-  -readability-magic-numbers
+  -readability-identifier-naming,
+  -readability-implicit-bool-conversion,
+  -readability-isolate-declaration,
+  -readability-magic-numbers,
+  -readability-math-missing-parentheses,
+  -readability-named-parameter,
+  -readability-trailing-comma,
+  -readability-uppercase-literal-suffix,
+  -readability-use-anyofallof,
+  -readability-use-std-min-max
 
 WarningsAsErrors: ''
 HeaderFilterRegex: '^.*[\\/]src[\\/]'
 FormatStyle: file
 UseColor: true
-
-CheckOptions:
-  - key: readability-identifier-naming.NamespaceCase
-    value: lower_case
-  - key: readability-identifier-naming.ClassCase
-    value: CamelCase
-  - key: readability-identifier-naming.StructCase
-    value: CamelCase
-  - key: readability-identifier-naming.EnumCase
-    value: CamelCase
-  - key: readability-identifier-naming.EnumConstantCase
-    value: CamelCase
-  - key: readability-identifier-naming.FunctionCase
-    value: CamelCase
-  - key: readability-identifier-naming.VariableCase
-    value: lower_case
-  - key: readability-identifier-naming.MemberCase
-    value: lower_case
-  - key: readability-identifier-naming.MemberSuffix
-    value: '_'
-  - key: readability-identifier-naming.PrivateMemberSuffix
-    value: '_'
-  - key: readability-identifier-naming.ConstantCase
-    value: CamelCase
-  - key: readability-identifier-naming.ConstantPrefix
-    value: k
