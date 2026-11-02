@@ -1,4 +1,4 @@
-# mcp SDK pinned: mcp==2.2.0 (installed machine-level via `pip install "mcp==2.2.0"`).
+# mcp SDK pinned by tools/vcpkg-query/requirements.txt (mcp==2.3.0).
 # Official SDK: from mcp.server.mcpserver import MCPServer (mcp 2.x; FastMCP was renamed).
 # Runtime imports: mcp + stdlib only (json, os, re, subprocess, sys, pathlib). No network, no writes.
 """Offline, read-only vcpkg registry query MCP server (stdio).
