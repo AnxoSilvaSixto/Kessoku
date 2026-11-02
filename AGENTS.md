@@ -48,8 +48,10 @@ Stop and flag (don't decide, don't guess) before: adding a dependency, adding an
 
 ## Verification
 
-- Build: `<TODO: fill in the actual CMake configure/build invocation and preset name>`
-- Tests: `<TODO: fill in the test runner/command>`
+- Build: `cmake --preset default` then `cmake --build --preset default` (Visual Studio 2026, Debug, x64-windows). `cmake --build --preset release` covers Release.
+- Tests: `ctest --preset default` (all six CTest executables). ASan: `cmake --preset asan`, `cmake --build --preset asan`, `ctest --preset asan`.
+- Compile commands for clangd: `scripts\setup-ninja-env.bat` writes `build/ninja/compile_commands.json`; this is a developer aid, not the build of record.
+- Smoke test: run `build\Debug\Kessoku.exe` from `build\Debug`, confirm the window opens, and confirm exit code 0 after closing.
 - For anything touching audio, filesystem paths, or metadata writes: test the failure paths explicitly (device loss, path-escape attempts, malformed tags), not just the happy path. These are correctness/security-critical, not places to spot-check.
 - If LSP diagnostics are available (clangd, auto-detected for this C++ codebase once `lsp` is turned on in `opencode.json`), treat them as a fast first-pass signal, not a substitute for an actual build. A clean build is what "done" means, not a clean diagnostics pane.
 - Never report a build, test, or check as passing unless you actually ran it and it actually passed. "Should work" is not a verification result.
