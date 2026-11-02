@@ -107,6 +107,9 @@ bool AppendFlacFramePcm(std::vector<uint8_t>& out,
             const int32_t sample = channels[ch][i];
             // Samples are right-aligned int32 from libFLAC and are stored
             // without scaling: packing only, no DSP.
+            // The masks read the two's-complement bit pattern, which is the
+            // PCM payload itself; no signed arithmetic is intended.
+            // NOLINTBEGIN(bugprone-signed-bitwise)
             switch (bitsPerSample) {
                 case 8:
                     // 8-bit FLAC is signed; the PCM wire format is unsigned.
@@ -137,7 +140,12 @@ bool AppendFlacFramePcm(std::vector<uint8_t>& out,
                         static_cast<uint8_t>((bits >> 24) & 0xFF));
                     break;
                 }
+                default:
+                    // bitsPerSample is validated above; fail loudly rather
+                    // than emit a partially packed frame if that ever drifts.
+                    return false;
             }
+            // NOLINTEND(bugprone-signed-bitwise)
         }
     }
     return true;
