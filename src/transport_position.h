@@ -55,7 +55,7 @@ inline std::wstring FormatTrackTime(uint32_t frames, uint32_t sampleRate)
     uint64_t seconds = totalSeconds % 60;
     std::wstring text = std::to_wstring(minutes) + L":";
     if (seconds < 10) {
-        text += L"0";
+        text += L'0';
     }
     text += std::to_wstring(seconds);
     return text;

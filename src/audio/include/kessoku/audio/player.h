@@ -30,6 +30,7 @@ class Player {
 public:
     Player(const Player&) = delete;
     Player& operator=(const Player&) = delete;
+    Player& operator=(Player&&) = delete;
 
     Player(Player&& other) noexcept
         : pEnumerator_(other.pEnumerator_),

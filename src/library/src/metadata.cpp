@@ -21,7 +21,7 @@ std::wstring TagLibStringToWString(const TagLib::String& s) {
 uint32_t ParseTrackNumber(const TagLib::String& s) {
     bool ok = false;
     long long val = s.toLongLong(&ok, 10);
-    if (!ok || val <= 0 || val > 0xFFFFFFFF) {
+    if (!ok || val <= 0 || val > 0xFFFFFFFFLL) {
         return 0;
     }
     return static_cast<uint32_t>(val);

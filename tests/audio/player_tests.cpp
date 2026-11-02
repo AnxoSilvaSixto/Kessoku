@@ -1121,13 +1121,14 @@ int main() {
 
             std::vector<uint8_t> decoded;
             decoded.reserve(static_cast<size_t>(kFrames) * 2);
-            std::vector<uint8_t> chunk(1000 * 2);
+            std::vector<uint8_t> chunk(static_cast<size_t>(1000) * 2);
             uint32_t totalRead = 0;
             for (int n = 0; n < 9; ++n) {
                 uint32_t got = reader.ReadFrames(chunk.data(), 1000);
                 CHECK(got == 1000, "Read 1000 frames per call");
                 decoded.insert(decoded.end(), chunk.begin(),
-                               chunk.begin() + got * 2);
+                               chunk.begin() +
+                                   static_cast<std::ptrdiff_t>(got) * 2);
                 totalRead += got;
             }
             CHECK(totalRead == kFrames, "Read all frames");
@@ -1471,8 +1472,7 @@ int main() {
             }
 
             DeleteFileW(wavPath.data());
-            std::wstring dir = tempDir;
-            RemoveDirectoryW(dir.c_str());
+            RemoveDirectoryW(tempDir.c_str());
         }
     }
 

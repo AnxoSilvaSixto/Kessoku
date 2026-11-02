@@ -262,7 +262,7 @@ int main() {
         CHECK(result.IsOk(), "ReadTrackMetadata succeeded for FLAC");
 
         if (result.IsOk()) {
-            auto meta = result.Value();
+            const auto& meta = result.Value();
             CHECK(meta.title == L"Test Title", "FLAC title matches");
             CHECK(meta.artist == L"Test Artist", "FLAC artist matches");
             CHECK(meta.album == L"Test Album", "FLAC album matches");
@@ -290,7 +290,7 @@ int main() {
         CHECK(result.IsOk(), "ReadTrackMetadata succeeded for WAV");
 
         if (result.IsOk()) {
-            auto meta = result.Value();
+            const auto& meta = result.Value();
             CHECK(meta.title == L"Wav Title", "WAV title matches");
             CHECK(meta.artist == L"Wav Artist", "WAV artist matches");
             CHECK(meta.album == L"Wav Album", "WAV album matches");
@@ -326,7 +326,7 @@ int main() {
         CHECK(result.IsOk(), "ReadTrackMetadata succeeded for dual-tag WAV");
 
         if (result.IsOk()) {
-            auto meta = result.Value();
+            const auto& meta = result.Value();
             CHECK(meta.title == L"ID3v2 Title", "WAV title is from ID3v2, not INFO");
             CHECK(meta.artist == L"ID3v2 Artist", "WAV artist is from ID3v2, not INFO");
             CHECK(meta.album == L"ID3v2 Album", "WAV album is from ID3v2, not INFO");
@@ -349,7 +349,7 @@ int main() {
         CHECK(result.IsOk(), "untagged FLAC -> success (not error)");
 
         if (result.IsOk()) {
-            auto meta = result.Value();
+            const auto& meta = result.Value();
             CHECK(meta.title.empty(), "untagged FLAC title is empty");
             CHECK(meta.artist.empty(), "untagged FLAC artist is empty");
             CHECK(meta.album.empty(), "untagged FLAC album is empty");
@@ -372,7 +372,7 @@ int main() {
         CHECK(result.IsOk(), "untagged WAV -> success (not error)");
 
         if (result.IsOk()) {
-            auto meta = result.Value();
+            const auto& meta = result.Value();
             CHECK(meta.title.empty(), "untagged WAV title is empty");
             CHECK(meta.artist.empty(), "untagged WAV artist is empty");
             CHECK(meta.album.empty(), "untagged WAV album is empty");
@@ -401,7 +401,7 @@ int main() {
         CHECK(result.IsOk(), "INFO-only WAV -> success (not error)");
 
         if (result.IsOk()) {
-            auto meta = result.Value();
+            const auto& meta = result.Value();
             CHECK(meta.title.empty(), "INFO-only WAV title is empty (not from INFO)");
             CHECK(meta.artist.empty(), "INFO-only WAV artist is empty (not from INFO)");
             CHECK(meta.album.empty(), "INFO-only WAV album is empty (not from INFO)");
@@ -528,7 +528,7 @@ int main() {
         CHECK(result.IsOk(), "partial FLAC read succeeded");
 
         if (result.IsOk()) {
-            auto meta = result.Value();
+            const auto& meta = result.Value();
             CHECK(meta.title == L"Partial Title", "partial FLAC title present");
             CHECK(meta.artist.empty(), "partial FLAC artist is empty");
             CHECK(meta.album.empty(), "partial FLAC album is empty");

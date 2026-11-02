@@ -19,8 +19,6 @@
 
 namespace {
 
-constexpr uint32_t kReftimesPerSec = 10000000;
-
 kessoku::core::ErrorCode HResultToErrorCode(HRESULT hr) {
     switch (hr) {
         case AUDCLNT_E_UNSUPPORTED_FORMAT:
@@ -1086,8 +1084,10 @@ bool Player::RenderIteration() {
         return false;
     }
 
-    // Zero out buffer (silence for EOF).
-    std::memset(pData, 0, bufferFrameCount_ * bytesPerFrame_);
+    // Zero out buffer (silence for EOF). Widen before multiplying so the
+    // byte count cannot wrap in 32 bits.
+    std::memset(pData, 0,
+                static_cast<size_t>(bufferFrameCount_) * bytesPerFrame_);
 
     // Read frames from the source: WAV file bytes or decoded FLAC samples.
     // The remaining-count computation, decode, and currentFrame_ advance

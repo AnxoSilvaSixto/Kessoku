@@ -215,7 +215,6 @@ int main() {
     std::wstring junctionTarget = tempDir + L"\\kessoku_junction_target";
     if (CreateDirectoryW(junctionTarget.c_str(), nullptr) ||
         GetLastError() == ERROR_ALREADY_EXISTS) {
-        std::wstring targetFile = junctionTarget + L"\\outside.flac";
         CreateFileInDir(junctionTarget, L"outside.flac");
 
         bool junctionOk = CreateJunction(junctionPath, junctionTarget);

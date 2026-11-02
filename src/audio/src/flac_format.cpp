@@ -202,10 +202,9 @@ std::string FlacReader::Open(const std::wstring& path, const FlacFormat& fmt,
         return "Could not read FLAC metadata";
     }
 
-    if (startSample > 0) {
-        if (FLAC__stream_decoder_seek_absolute(decoder, startSample) == 0) {
-            FLAC__stream_decoder_flush(decoder);
-        }
+    if (startSample > 0 &&
+        FLAC__stream_decoder_seek_absolute(decoder, startSample) == 0) {
+        FLAC__stream_decoder_flush(decoder);
     }
     return {};
 }

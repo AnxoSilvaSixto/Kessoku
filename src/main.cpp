@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <thread>
 #include <vector>
@@ -210,7 +211,8 @@ public:
 
     LRESULT OnScanComplete(UINT, WPARAM wParam, LPARAM, BOOL&)
     {
-        ScanResultData* data = reinterpret_cast<ScanResultData*>(wParam);
+        std::unique_ptr<ScanResultData> data(
+            reinterpret_cast<ScanResultData*>(wParam));
         if (!data) {
             return 0;
         }
@@ -228,7 +230,7 @@ public:
                     title = filePath.stem().c_str();
                 }
 
-                int row = static_cast<int>(m_listView.InsertItem(static_cast<int>(i), title.c_str()));
+                int row = m_listView.InsertItem(static_cast<int>(i), title.c_str());
                 if (!track.artist.empty()) {
                     m_listView.SetItemText(row, 1, track.artist.c_str());
                 }
@@ -245,7 +247,6 @@ public:
             m_statusLabel.SetWindowTextW(L"Ready");
         }
 
-        delete data;
         return 0;
     }
 
@@ -565,10 +566,11 @@ std::wstring PickFolder(HWND owner)
         return L"";
     }
 
-    DWORD dwOptions;
+    DWORD dwOptions = 0;
     hr = pDialog->GetOptions(&dwOptions);
     if (SUCCEEDED(hr)) {
-        pDialog->SetOptions(dwOptions | FOS_PICKFOLDERS);
+        pDialog->SetOptions(
+            dwOptions | static_cast<FILEOPENDIALOGOPTIONS>(FOS_PICKFOLDERS));
     }
 
     pDialog->SetTitle(L"Select music library folder");
@@ -637,7 +639,13 @@ void RunScanAndPost(HWND hWnd, const std::wstring& folderPath)
     }
 
     auto* data = new ScanResultData{std::move(tracks)};
-    PostMessage(hWnd, WM_SCAN_COMPLETE, WPARAM(data), 0);
+    if (PostMessage(hWnd, WM_SCAN_COMPLETE,
+                    reinterpret_cast<WPARAM>(data), 0) == FALSE) {
+        delete data;
+    }
+    // On success the message handler owns and deletes the payload; the
+    // analyzer cannot follow ownership across the message hop.
+    // NOLINTNEXTLINE(clang-analyzer-cplusplus.NewDeleteLeaks)
 }
 
 } // namespace

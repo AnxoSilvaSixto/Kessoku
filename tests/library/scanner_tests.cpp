@@ -12,14 +12,6 @@
 
 namespace {
 
-bool StringStartsWith(std::wstring_view haystack, std::wstring_view needle) {
-    if (haystack.size() < needle.size()) return false;
-    for (size_t i = 0; i < needle.size(); ++i) {
-        if (haystack[i] != needle[i]) return false;
-    }
-    return true;
-}
-
 int gFailures = 0;
 
 void Check(bool condition, const char* testName, const char* desc,

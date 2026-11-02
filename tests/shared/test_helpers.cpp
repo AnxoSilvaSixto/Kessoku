@@ -10,7 +10,6 @@
 namespace {
 
 std::wstring GetTempParent() {
-    std::wstring tempDir;
     wchar_t buf[MAX_PATH]{};
     DWORD len = GetTempPathW(MAX_PATH, buf);
     if (len == 0 || len > MAX_PATH) return {};
