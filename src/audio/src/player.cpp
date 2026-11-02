@@ -634,6 +634,14 @@ core::Status Player::Pause() {
     pAc->Stop();
 
     state_ = PlaybackState::Paused;
+
+    // IAudioClient::Stop() does not join our render thread. Wait out an
+    // iteration that was already in flight, so the position cannot advance
+    // after Pause() returns. RenderIteration re-checks the state under the
+    // same lock, so a thread that had only passed the loop's Playing check
+    // will bail instead of rendering after this point.
+    std::lock_guard<std::mutex> renderLock(renderMutex_);
+
     return core::Result<void>::Ok();
 }
 
@@ -686,7 +694,10 @@ core::Status Player::Seek(uint32_t frameOffset) {
         // needs no Pause()/Resume() pair and the state stays Paused.
         const bool wasPaused = (state_.load() == PlaybackState::Paused);
         if (!wasPaused) {
-            Pause();
+            auto pauseStatus = Pause();
+            if (pauseStatus.IsErr()) {
+                return pauseStatus;
+            }
         }
         {
             std::lock_guard<std::mutex> lock(positionMutex_);
@@ -700,7 +711,10 @@ core::Status Player::Seek(uint32_t frameOffset) {
             }
         }
         if (!wasPaused) {
-            Resume();
+            auto resumeStatus = Resume();
+            if (resumeStatus.IsErr()) {
+                return resumeStatus;
+            }
         }
 
         return core::Result<void>::Ok();
@@ -715,7 +729,10 @@ core::Status Player::Seek(uint32_t frameOffset) {
     // reading, so skip Pause()/Resume() and stay Paused.
     const bool wasPaused = (state_.load() == PlaybackState::Paused);
     if (!wasPaused) {
-        Pause();
+        auto pauseStatus = Pause();
+        if (pauseStatus.IsErr()) {
+            return pauseStatus;
+        }
     }
     {
         std::lock_guard<std::mutex> lock(positionMutex_);
@@ -729,7 +746,10 @@ core::Status Player::Seek(uint32_t frameOffset) {
         }
     }
     if (!wasPaused) {
-        Resume();
+        auto resumeStatus = Resume();
+        if (resumeStatus.IsErr()) {
+            return resumeStatus;
+        }
     }
 
     return core::Result<void>::Ok();
@@ -971,7 +991,8 @@ void Player::RenderThreadEntry() {
 
 Player::~Player() {
     AssertCallingThread();
-    Stop();
+    // Destructors cannot report failures; Stop() is best-effort cleanup here.
+    (void)Stop();
 }
 
 void Player::OpenWavFile() {
@@ -1042,6 +1063,17 @@ uint32_t Player::ReadFrames(uint8_t* buffer, uint32_t maxFrames) {
 }
 
 bool Player::RenderIteration() {
+    std::lock_guard<std::mutex> renderLock(renderMutex_);
+
+    // Pause()/Seek() can race with the loop's state check. Re-check here,
+    // under the same lock Pause() takes after storing Paused, so an
+    // iteration that lost that race never advances the position. Returning
+    // true keeps the caller's loop alive; it observes Paused on its next
+    // top-of-loop check.
+    if (state_.load() != PlaybackState::Playing) {
+        return true;
+    }
+
     IAudioRenderClient* pRC =
         reinterpret_cast<IAudioRenderClient*>(pRenderClient_);
 

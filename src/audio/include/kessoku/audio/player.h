@@ -159,6 +159,12 @@ private:
     uint32_t bufferFrameCount_ = 0;
     uint32_t bytesPerFrame_ = 0;
 
+    // Serializes a whole RenderIteration against Pause()/Seek(). Without it,
+    // an iteration that passed the loop's Playing check before Pause() could
+    // still advance currentFrame_ after Pause() returned, making the paused
+    // position move. Lock order: renderMutex_ -> positionMutex_.
+    std::mutex renderMutex_;
+
     // Playback position, shared between the API thread (Play/Seek/Stop/
     // GetPosition) and the render thread (Open*/RenderIteration/ReadFrames).
     // Guarded by positionMutex_, which also serializes the WAV file handle

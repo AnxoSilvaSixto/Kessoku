@@ -472,7 +472,7 @@ int main() {
                 CHECK(player.GetState() == kessoku::audio::PlaybackState::Stopped,
                       "Initial state is Stopped");
 
-                player.Stop();
+                (void)player.Stop();
             }
 
             CleanupTempWav(wavPath);
@@ -622,7 +622,7 @@ int main() {
                 CHECK(pos > 0, "Position is non-zero during playback");
                 CHECK(pos <= 44100, "Position is within total frames");
 
-                player.Stop();
+                (void)player.Stop();
             }
 
             CleanupTempWav(wavPath);
@@ -660,10 +660,17 @@ int main() {
                 // Seek to frame 10000
                 auto seekStatus = player.Seek(10000);
                 CHECK(seekStatus.IsOk(), "Seek() succeeds");
-                CHECK(player.GetPosition() == 10000,
-                      "Position is 10000 after Seek(10000)");
+                // Seek() auto-resumes when called while Playing, so the
+                // render thread may legitimately advance past the target
+                // before this read. Exactness is asserted by the paused-seek
+                // tests; here only the reposition itself is required.
+                const uint32_t posAfterSeek = player.GetPosition();
+                CHECK(posAfterSeek >= 10000,
+                      "Position is at least 10000 after Seek(10000)");
+                CHECK(posAfterSeek < player.GetTotalFrames(),
+                      "Position is within total frames after Seek(10000)");
 
-                player.Stop();
+                (void)player.Stop();
             }
 
             CleanupTempWav(wavPath);
@@ -704,7 +711,7 @@ int main() {
                 printf("SKIP: device-loss coverage (no seam to drive Player "
                        "into DeviceLost without real hardware manipulation)\n");
 
-                player.Stop();
+                (void)player.Stop();
             }
 
             CleanupTempWav(wavPath);
@@ -973,7 +980,7 @@ int main() {
                           kessoku::audio::PlaybackState::Stopped,
                       "FLAC initial state is Stopped");
 
-                player.Stop();
+                (void)player.Stop();
             }
 
             CleanupTempFlac(flacPath);
@@ -1065,10 +1072,14 @@ int main() {
 
                 auto seekStatus = player.Seek(10000);
                 CHECK(seekStatus.IsOk(), "FLAC Seek() succeeds");
-                CHECK(player.GetPosition() == 10000,
-                      "FLAC position is 10000 after Seek(10000)");
+                // Same async-advance allowance as the WAV seek test above.
+                const uint32_t posAfterSeek = player.GetPosition();
+                CHECK(posAfterSeek >= 10000,
+                      "FLAC position is at least 10000 after Seek(10000)");
+                CHECK(posAfterSeek < player.GetTotalFrames(),
+                      "FLAC position is within total frames after Seek(10000)");
 
-                player.Stop();
+                (void)player.Stop();
             }
 
             CleanupTempFlac(flacPath);
@@ -1190,7 +1201,7 @@ int main() {
                           kessoku::audio::PlaybackState::Playing,
                       "State is Playing after replay");
 
-                player.Stop();
+                (void)player.Stop();
             }
 
             CleanupTempWav(wavPath);
@@ -1234,7 +1245,7 @@ int main() {
                           kessoku::audio::PlaybackState::Playing,
                       "State is Playing after Play() while Paused");
 
-                player.Stop();
+                (void)player.Stop();
             }
 
             CleanupTempWav(wavPath);
@@ -1297,7 +1308,7 @@ int main() {
                 CHECK(player.GetPosition() != 0 || pausedPos == 0,
                       "Resume did not restart from frame 0");
 
-                player.Stop();
+                (void)player.Stop();
             }
 
             CleanupTempWav(wavPath);
@@ -1369,7 +1380,7 @@ int main() {
                 CHECK(stopped,
                       "Corrupted FLAC stops within deadline (not hang)");
 
-                player.Stop();
+                (void)player.Stop();
             }
 
             CleanupTempFlac(flacPath);
@@ -1541,7 +1552,7 @@ int main() {
                         CHECK(player.GetPosition() == total,
                               "Misaligned WAV position reaches total");
 
-                        player.Stop();
+                        (void)player.Stop();
                     }
 
                     CleanupTempWav(wavPath);
@@ -1587,7 +1598,7 @@ int main() {
                         CHECK(player.GetPosition() == total,
                               "Misaligned FLAC position reaches total");
 
-                        player.Stop();
+                        (void)player.Stop();
                     }
 
                     CleanupTempFlac(flacPath);
@@ -1638,17 +1649,22 @@ int main() {
                       "Back to Playing for the second half");
                 if (player.GetState() ==
                     kessoku::audio::PlaybackState::Paused) {
-                    player.Resume();
+                    (void)player.Resume();
                 }
                 auto seekPlaying = player.Seek(20000);
                 CHECK(seekPlaying.IsOk(), "Seek() while Playing succeeds");
                 CHECK(player.GetState() ==
                           kessoku::audio::PlaybackState::Playing,
                       "State stays Playing after Seek() while Playing");
-                CHECK(player.GetPosition() == 20000,
-                      "Position is 20000 after Seek(20000)");
+                // Playing seeks may advance before the read; exactness while
+                // paused is covered above and in the FLAC paused-seek test.
+                const uint32_t posAfterPlayingSeek = player.GetPosition();
+                CHECK(posAfterPlayingSeek >= 20000,
+                      "Position is at least 20000 after Seek(20000)");
+                CHECK(posAfterPlayingSeek < player.GetTotalFrames(),
+                      "Position is within total frames after Seek(20000)");
 
-                player.Stop();
+                (void)player.Stop();
             }
 
             CleanupTempWav(wavPath);
@@ -1692,7 +1708,7 @@ int main() {
 
                 if (player.GetState() ==
                     kessoku::audio::PlaybackState::Paused) {
-                    player.Resume();
+                    (void)player.Resume();
                 }
                 auto seekPlaying = player.Seek(20000);
                 CHECK(seekPlaying.IsOk(),
@@ -1701,7 +1717,7 @@ int main() {
                           kessoku::audio::PlaybackState::Playing,
                       "FLAC state stays Playing after Seek() while Playing");
 
-                player.Stop();
+                (void)player.Stop();
             }
 
             CleanupTempFlac(flacPath);
