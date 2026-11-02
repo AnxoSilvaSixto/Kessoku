@@ -19,3 +19,7 @@ Testing/
 
 # OS cruft
 Thumbs.db
+
+# Python bytecode (tools/vcpkg-query import checks)
+__pycache__/
+*.pyc
