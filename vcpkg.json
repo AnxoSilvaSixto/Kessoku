@@ -1,7 +1,9 @@
 {
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "name": "kessoku",
   "version": "0.1.0",
-  "builtin-baseline": "319504a5326aa870edde46438c5455fa76305a56",
+  "builtin-baseline": "9eec002df1cd109f8f104cd966a763daf9751489",
+  "supports": "windows",
   "dependencies": [
     "libflac",
     "taglib",
