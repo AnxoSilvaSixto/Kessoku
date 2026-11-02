@@ -12,17 +12,14 @@ target_link_libraries(kessoku_audio PUBLIC
     kessoku_core
 )
 
+target_link_libraries(kessoku_audio PRIVATE
+    kessoku_build_options
+)
+
 # Completes the approved libFLAC decision (CLAUDE.md 16.1): Kessoku.exe
 # already links FLAC::FLAC; this makes the decoder available to the audio
 # engine itself. No new dependency. PRIVATE: no FLAC type appears in the
 # public headers.
 target_link_libraries(kessoku_audio PRIVATE
     FLAC::FLAC
-)
-
-target_compile_options(kessoku_audio PRIVATE /W4)
-
-target_compile_definitions(kessoku_audio PRIVATE
-    _UNICODE
-    UNICODE
 )

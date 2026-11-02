@@ -12,9 +12,6 @@ target_link_libraries(kessoku_library PUBLIC
     TagLib::TagLib
 )
 
-target_compile_options(kessoku_library PRIVATE /W4)
-
-target_compile_definitions(kessoku_library PRIVATE
-    _UNICODE
-    UNICODE
+target_link_libraries(kessoku_library PRIVATE
+    kessoku_build_options
 )

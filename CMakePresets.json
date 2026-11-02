@@ -1,5 +1,10 @@
 {
-    "version": 3,
+    "version": 10,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 31,
+        "patch": 0
+    },
     "configurePresets": [
         {
             "name": "default",
@@ -18,7 +23,9 @@
             "binaryDir": "${sourceDir}/build/ninja",
             "cacheVariables": {
                 "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
-                "VCPKG_TARGET_TRIPLET": "x64-windows"
+                "VCPKG_TARGET_TRIPLET": "x64-windows",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "CMAKE_BUILD_TYPE": "Debug"
             }
         },
         {
@@ -28,7 +35,7 @@
             "binaryDir": "${sourceDir}/build-asan",
             "cacheVariables": {
                 "CMAKE_CXX_FLAGS_DEBUG": "/Ob0 /Od /Zi /fsanitize=address",
-                "CMAKE_EXE_LINKER_FLAGS_DEBUG": "/INCREMENTAL:NO",
+                "CMAKE_EXE_LINKER_FLAGS_DEBUG": "/INCREMENTAL:NO /DEBUG",
                 "KESSOKU_ENABLE_ASAN": "ON"
             }
         }
@@ -38,13 +45,29 @@
             "name": "default",
             "displayName": "Build (Debug)",
             "configurePreset": "default",
-            "configuration": "Debug"
+            "configuration": "Debug",
+            "jobs": 1
+        },
+        {
+            "name": "release",
+            "displayName": "Build (Release)",
+            "configurePreset": "default",
+            "configuration": "Release",
+            "jobs": 1
+        },
+        {
+            "name": "compile-commands",
+            "displayName": "Build compile_commands.json (Ninja Debug)",
+            "configurePreset": "compile-commands",
+            "configuration": "Debug",
+            "jobs": 1
         },
         {
             "name": "asan",
             "displayName": "Build (ASan Debug)",
             "configurePreset": "asan",
-            "configuration": "Debug"
+            "configuration": "Debug",
+            "jobs": 1
         }
     ],
     "testPresets": [
@@ -52,13 +75,49 @@
             "name": "default",
             "displayName": "Test (Debug)",
             "configurePreset": "default",
-            "configuration": "Debug"
+            "configuration": "Debug",
+            "output": {
+                "outputOnFailure": true
+            },
+            "execution": {
+                "timeout": 120
+            }
+        },
+        {
+            "name": "release",
+            "displayName": "Test (Release)",
+            "configurePreset": "default",
+            "configuration": "Release",
+            "output": {
+                "outputOnFailure": true
+            },
+            "execution": {
+                "timeout": 120
+            }
+        },
+        {
+            "name": "compile-commands",
+            "displayName": "Test (Ninja Debug)",
+            "configurePreset": "compile-commands",
+            "configuration": "Debug",
+            "output": {
+                "outputOnFailure": true
+            },
+            "execution": {
+                "timeout": 120
+            }
         },
         {
             "name": "asan",
             "displayName": "Test (ASan Debug)",
             "configurePreset": "asan",
-            "configuration": "Debug"
+            "configuration": "Debug",
+            "output": {
+                "outputOnFailure": true
+            },
+            "execution": {
+                "timeout": 120
+            }
         }
     ]
 }

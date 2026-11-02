@@ -1,14 +1,31 @@
-cmake_minimum_required(VERSION 3.29)
+cmake_minimum_required(VERSION 3.31)
 
-project(Kessoku CXX)
+project(Kessoku VERSION 0.1.0 LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+# C++20 is the newest standard MSVC 19.51 implements without preview mode.
+# C++23 remains deferred until MSVC ships final /std:c++23 (see commit 811e4a5).
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Pin MSVC runtime library to match vcpkg x64-windows default (dynamic CRT).
-# CMP0091 is NEW by default (cmake_minimum_required 3.29 > policy intro 3.15).
+# CMP0091 is NEW by default (cmake_minimum_required 3.31 > policy intro 3.15).
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+
+# Shared compile contract for every first-party target. Third-party imported
+# targets keep their own flags; these apply only to our sources.
+add_library(kessoku_build_options INTERFACE)
+target_compile_options(kessoku_build_options INTERFACE
+    /W4
+    /utf-8
+    /permissive-
+    /Zc:__cplusplus
+    /Zc:preprocessor
+)
+target_compile_definitions(kessoku_build_options INTERFACE
+    _UNICODE
+    UNICODE
+)
 
 # Option to mark when building under the asan preset.
 option(KESSOKU_ENABLE_ASAN "Building under the asan preset" OFF)
@@ -32,9 +49,6 @@ function(kessoku_copy_asan_runtime target)
         VERBATIM)
 endfunction()
 
-# Export compile_commands.json for clangd (advisory only; MSVC is truth).
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
 enable_testing()
 
 find_package(FLAC CONFIG REQUIRED)
@@ -56,18 +70,12 @@ target_include_directories(Kessoku PRIVATE
 )
 
 target_link_libraries(Kessoku PRIVATE
+    kessoku_build_options
     kessoku_core
     kessoku_audio
     kessoku_library
     FLAC::FLAC
     TagLib::TagLib
-)
-
-target_compile_options(Kessoku PRIVATE /W4)
-
-target_compile_definitions(Kessoku PRIVATE
-    _UNICODE
-    UNICODE
 )
 
 add_subdirectory(tests)
