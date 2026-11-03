@@ -49,8 +49,14 @@ bool PathHasRootBoundary(std::wstring_view resolved,
         return true;
     }
 
-    if (resolved.size() <= canonicalRoot.size()) {
+    if (resolved.size() < canonicalRoot.size()) {
         return false;
+    }
+
+    // GetFinalPathNameByHandleW keeps the trailing separator on a volume root
+    // ("C:\"), so everything below it is already inside the boundary.
+    if (!canonicalRoot.empty() && canonicalRoot.back() == L'\\') {
+        return true;
     }
 
     return resolved[canonicalRoot.size()] == L'\\';

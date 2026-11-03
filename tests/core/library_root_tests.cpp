@@ -268,6 +268,26 @@ int main() {
         L"C:\\this\\path\\does\\not\\exist\\at\\all");
     CHECK(errResult.IsErr(), "Create() with non-existent path returns Err");
 
+    // (n) A root selected at a volume root ("C:\") must contain its
+    // descendants. Its canonical form ends with a separator, so the boundary
+    // check has to accept that trailing separator as the boundary itself.
+    wchar_t windowsDir[MAX_PATH]{};
+    UINT windowsLen = GetWindowsDirectoryW(windowsDir, MAX_PATH);
+    if (windowsLen > 0 && windowsLen < MAX_PATH) {
+        std::wstring volumeRoot(windowsDir, 2); // e.g. "C:"
+        volumeRoot += L'\\';
+
+        auto volumeResult = kessoku::core::LibraryRoot::Create(volumeRoot);
+        CHECK(volumeResult.IsOk(), "Create() with a volume root succeeds");
+        if (volumeResult.IsOk()) {
+            CHECK(volumeResult.Value().Contains(windowsDir),
+                  "directory directly under a volume root");
+        }
+    } else {
+        printf("SKIP: volume-root containment test "
+               "(GetWindowsDirectoryW failed)\n");
+    }
+
     // --- Cleanup ---
     DeleteFileW(rootFile.c_str());
     DeleteFileW(nestedFile.c_str());
