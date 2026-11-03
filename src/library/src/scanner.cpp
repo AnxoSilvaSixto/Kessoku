@@ -74,45 +74,56 @@ void ScanDirectory(
     std::vector<SkippedEntry>& skipped) {
 
     std::error_code ec;
-    auto it = std::filesystem::directory_iterator(dir, ec);
+    std::filesystem::directory_iterator it(dir, ec);
     if (ec) {
         skipped.push_back({dir, DescribeErrorCode(ec)});
         return;
     }
 
-    for (const auto& entry : it) {
+    const std::filesystem::directory_iterator end;
+    while (it != end) {
+        const std::filesystem::directory_entry entry = *it;
+
         std::error_code entryEc;
         bool isDir = entry.is_directory(entryEc);
         if (entryEc) {
             skipped.push_back({entry.path(), DescribeErrorCode(entryEc)});
-            continue;
-        }
-        entryEc.clear();
-        bool isFile = entry.is_regular_file(entryEc);
-        if (entryEc) {
-            skipped.push_back({entry.path(), DescribeErrorCode(entryEc)});
-            continue;
-        }
-
-        if (isDir) {
-            DWORD attrs = GetFileAttributesW(entry.path().c_str());
-            if (attrs != INVALID_FILE_ATTRIBUTES &&
-                (attrs & FILE_ATTRIBUTE_REPARSE_POINT)) {
-                skipped.push_back({entry.path(),
-                    "reparse point (not followed)"});
-                continue;
-            }
-            ScanDirectory(entry.path(), root, files, skipped);
-        } else if (isFile) {
-            std::wstring ext = entry.path().extension().wstring();
-            if (IsAudioExtension(ext)) {
-                if (root.Contains(entry.path().wstring())) {
-                    files.push_back(entry.path());
-                } else {
+        } else {
+            entryEc.clear();
+            bool isFile = entry.is_regular_file(entryEc);
+            if (entryEc) {
+                skipped.push_back({entry.path(), DescribeErrorCode(entryEc)});
+            } else if (isDir) {
+                DWORD attrs = GetFileAttributesW(entry.path().c_str());
+                if (attrs != INVALID_FILE_ATTRIBUTES &&
+                    (attrs & FILE_ATTRIBUTE_REPARSE_POINT)) {
                     skipped.push_back({entry.path(),
-                        "resolved outside library root"});
+                        "reparse point (not followed)"});
+                } else {
+                    ScanDirectory(entry.path(), root, files, skipped);
+                }
+            } else if (isFile) {
+                std::wstring ext = entry.path().extension().wstring();
+                if (IsAudioExtension(ext)) {
+                    if (root.Contains(entry.path().wstring())) {
+                        files.push_back(entry.path());
+                    } else {
+                        skipped.push_back({entry.path(),
+                            "resolved outside library root"});
+                    }
                 }
             }
+        }
+
+        // Advance with the error_code overload. The range-for form calls the
+        // throwing operator++, which would escape Scan() on a mid-iteration
+        // I/O error; the UI runs this on a detached thread, where an
+        // uncaught exception terminates the whole process.
+        std::error_code incrementEc;
+        it.increment(incrementEc);
+        if (incrementEc) {
+            skipped.push_back({dir, DescribeErrorCode(incrementEc)});
+            return;
         }
     }
 }

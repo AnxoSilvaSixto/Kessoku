@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <new>
 #include <optional>
 #include <thread>
 #include <vector>
@@ -598,47 +599,61 @@ std::wstring PickFolder(HWND owner)
 
 void RunScanAndPost(HWND hWnd, const std::wstring& folderPath)
 {
-    auto rootResult = kessoku::core::LibraryRoot::Create(folderPath);
-    if (!rootResult.IsOk()) {
-        const auto& err = rootResult.GetError();
-        OutputDebugStringA("Kessoku: library root create failed: ");
-        OutputDebugStringA(err.message.c_str());
-        OutputDebugStringA("\n");
-        PostMessage(hWnd, WM_SCAN_COMPLETE, static_cast<WPARAM>(0), 0);
+    // Allocated up front so a failure on any path below still posts an empty
+    // result: the UI thread must always hear back, and a detached thread
+    // must never let an exception escape (that terminates the process).
+    auto* data = new (std::nothrow) ScanResultData{};
+    if (data == nullptr) {
+        OutputDebugStringA("Kessoku: scan allocation failed\n");
         return;
     }
 
-    const auto& root = rootResult.Value();
-    auto scanResult = kessoku::library::Scan(root);
-
-    std::vector<std::pair<std::filesystem::path, kessoku::library::TrackMetadata>> tracks;
-    tracks.reserve(scanResult.files.size());
-
-    for (const auto& skipped : scanResult.skipped) {
-        OutputDebugStringA("Kessoku: scan skipped: ");
-        OutputDebugStringA(skipped.reason.c_str());
-        OutputDebugStringA(" - ");
-        const std::string utf8 = kessoku::core::WideToUtf8(
-            skipped.path.wstring());
-        OutputDebugStringA(utf8.c_str());
-        OutputDebugStringA("\n");
-    }
-
-    std::sort(scanResult.files.begin(), scanResult.files.end());
-
-    for (const auto& filePath : scanResult.files) {
-        auto metaResult = kessoku::library::ReadTrackMetadata(filePath);
-        if (metaResult.IsOk()) {
-            tracks.emplace_back(filePath, metaResult.Value());
-        } else {
-            const auto& err = metaResult.GetError();
-            OutputDebugStringA("Kessoku: metadata read failed: ");
+    try {
+        auto rootResult = kessoku::core::LibraryRoot::Create(folderPath);
+        if (!rootResult.IsOk()) {
+            const auto& err = rootResult.GetError();
+            OutputDebugStringA("Kessoku: library root create failed: ");
             OutputDebugStringA(err.message.c_str());
             OutputDebugStringA("\n");
+        } else {
+            const auto& root = rootResult.Value();
+            auto scanResult = kessoku::library::Scan(root);
+
+            for (const auto& skipped : scanResult.skipped) {
+                OutputDebugStringA("Kessoku: scan skipped: ");
+                OutputDebugStringA(skipped.reason.c_str());
+                OutputDebugStringA(" - ");
+                const std::string utf8 = kessoku::core::WideToUtf8(
+                    skipped.path.wstring());
+                OutputDebugStringA(utf8.c_str());
+                OutputDebugStringA("\n");
+            }
+
+            std::sort(scanResult.files.begin(), scanResult.files.end());
+            data->tracks.reserve(scanResult.files.size());
+
+            for (const auto& filePath : scanResult.files) {
+                auto metaResult = kessoku::library::ReadTrackMetadata(filePath);
+                if (metaResult.IsOk()) {
+                    data->tracks.emplace_back(filePath, metaResult.Value());
+                } else {
+                    const auto& err = metaResult.GetError();
+                    OutputDebugStringA("Kessoku: metadata read failed: ");
+                    OutputDebugStringA(err.message.c_str());
+                    OutputDebugStringA("\n");
+                }
+            }
         }
+    } catch (const std::exception& ex) {
+        OutputDebugStringA("Kessoku: scan failed: ");
+        OutputDebugStringA(ex.what());
+        OutputDebugStringA("\n");
+        data->tracks.clear();
+    } catch (...) {
+        OutputDebugStringA("Kessoku: scan failed with an unknown exception\n");
+        data->tracks.clear();
     }
 
-    auto* data = new ScanResultData{std::move(tracks)};
     if (PostMessage(hWnd, WM_SCAN_COMPLETE,
                     reinterpret_cast<WPARAM>(data), 0) == FALSE) {
         delete data;
