@@ -811,6 +811,10 @@ int main() {
 
                 CHECK(player.GetState() == kessoku::audio::PlaybackState::Stopped,
                       "State remains Stopped after double Stop()");
+
+                // Stop() released the exclusive stream, so restarting this
+                // Player must fail cleanly rather than touch released state.
+                CHECK(player.Play().IsErr(), "Play() after Stop() returns Err");
             }
 
             CleanupTempWav(wavPath);

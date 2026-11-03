@@ -566,6 +566,18 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
 
 core::Status Player::Play() {
     AssertCallingThread();
+
+    // Stop() releases the exclusive-mode client, so this Player cannot be
+    // restarted afterwards; callers must Create() a new one. Natural
+    // end-of-stream also ends in Stopped but keeps these resources, so the
+    // state check below cannot tell the two cases apart.
+    if (pAudioClient_ == nullptr || pRenderClient_ == nullptr ||
+        hEvent_ == nullptr) {
+        return core::Result<void>::Err(
+            core::ErrorCode::AudioInitFailed,
+            "Player resources released; create a new Player");
+    }
+
     if (state_.load() != PlaybackState::Stopped &&
         state_.load() != PlaybackState::Paused) {
         return core::Result<void>::Err(
