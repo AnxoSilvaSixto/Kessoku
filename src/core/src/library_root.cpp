@@ -77,9 +77,37 @@ bool StringStartsWithOrdinalIAscii(std::wstring_view haystack,
     return true;
 }
 
+// Network shares are outside this app's local-only scope. UNC roots
+// (\\server\share) and their extended form (\\?\UNC\server\share) must be
+// rejected before they can be normalized into a path the scanner would
+// silently fail to walk.
+bool IsNetworkPath(std::wstring_view path) {
+    constexpr std::wstring_view kExtendedUnc = LR"(\\?\UNC\)";
+    if (StringStartsWithOrdinalIAscii(path, kExtendedUnc)) {
+        return true;
+    }
+
+    if (path.size() < 2 || path[0] != L'\\' || path[1] != L'\\') {
+        return false;
+    }
+
+    // \\?\C:\... is a local extended-length path, not a share.
+    if (path.size() >= 4 && path[2] == L'?' && path[3] == L'\\') {
+        return false;
+    }
+
+    return true;
+}
+
 } // namespace
 
 Result<LibraryRoot> LibraryRoot::Create(std::wstring_view selectedPath) {
+    if (IsNetworkPath(selectedPath)) {
+        return kessoku::core::Result<LibraryRoot>::Err(
+            ErrorCode::InvalidPath,
+            "Library folder must be local; network shares are not supported");
+    }
+
     std::wstring resolved = ResolveFinalPath(selectedPath);
 
     if (resolved.empty()) {
@@ -92,6 +120,13 @@ Result<LibraryRoot> LibraryRoot::Create(std::wstring_view selectedPath) {
         return kessoku::core::Result<LibraryRoot>::Err(
             ErrorCode::NotFound,
             "Library path not found or invalid");
+    }
+
+    // A mapped network drive can normalize to the share's extended UNC path.
+    if (IsNetworkPath(resolved)) {
+        return kessoku::core::Result<LibraryRoot>::Err(
+            ErrorCode::InvalidPath,
+            "Library folder must be local; network shares are not supported");
     }
 
     // Strip the \\?\ prefix that GetFinalPathNameByHandleW returns

@@ -288,6 +288,15 @@ int main() {
                "(GetWindowsDirectoryW failed)\n");
     }
 
+    // (o) A UNC network share is rejected before any filesystem access; the
+    // app is local-only, and a share root cannot be scanned like a local
+    // folder. This test needs no reachable share.
+    auto uncResult = kessoku::core::LibraryRoot::Create(
+        L"\\\\server\\share\\music");
+    CHECK(uncResult.IsErr() &&
+          uncResult.GetError().code == kessoku::core::ErrorCode::InvalidPath,
+          "Create() with a UNC share returns InvalidPath");
+
     // --- Cleanup ---
     DeleteFileW(rootFile.c_str());
     DeleteFileW(nestedFile.c_str());
