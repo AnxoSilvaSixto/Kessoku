@@ -159,11 +159,6 @@ bool FindDataChunk(const std::wstring& path, uint64_t& outOffset, uint64_t& outS
             return false;
         }
 
-        if (chunkSize > 1024 * 1024 * 100) { // Sanity: > 100MB
-            CloseHandle(hFile);
-            return false;
-        }
-
         if (std::memcmp(chunkId, "data", 4) == 0) {
             // The declared data range must fit inside the actual file.
             // A header overstating its data means a truncated file; reject
@@ -184,8 +179,11 @@ bool FindDataChunk(const std::wstring& path, uint64_t& outOffset, uint64_t& outS
             return true;
         }
 
-        // Skip chunk payload (align to 2 bytes)
-        pos.QuadPart += 8 + chunkSize;
+        // Skip chunk payload (align to 2 bytes). Widen before adding:
+        // chunkSize is uint32_t, so 8 + chunkSize would wrap for a bogus
+        // size near UINT32_MAX and misalign every following chunk header.
+        pos.QuadPart += static_cast<LONGLONG>(8) +
+                        static_cast<LONGLONG>(chunkSize);
         if (chunkSize % 2 != 0) {
             pos.QuadPart += 1;
         }

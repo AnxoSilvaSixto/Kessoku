@@ -439,6 +439,161 @@ bool QueryExclusiveBufferFrames(uint32_t sampleRate, uint16_t bitsPerSample,
     return true;
 }
 
+// Test 2c: RIFF puts no size cap on non-fmt chunks. Encoders routinely emit
+// a LIST/JUNK/id3 chunk before fmt, and rejecting it by an arbitrary 1MB
+// sanity limit refuses a perfectly valid WAV.
+void RunBigLeadingChunkTest() {
+    wchar_t buf[MAX_PATH]{};
+    DWORD len = GetTempPathW(MAX_PATH, buf);
+    if (len == 0 || len > MAX_PATH) {
+        return;
+    }
+    std::wstring tempDir = std::wstring(buf) + L"\\kessoku_test_player2c_";
+    std::wstring name = tempDir + L"\\big_junk.wav";
+    if (!CreateDirectoryW(tempDir.c_str(), nullptr) &&
+        GetLastError() != ERROR_ALREADY_EXISTS) {
+        return;
+    }
+
+    HANDLE hFile = CreateFileW(
+        name.data(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        RemoveDirectoryW(tempDir.c_str());
+        return;
+    }
+
+    char riffId[] = "RIFF";
+    uint32_t riffSize = 0xFFFFFFFF; // not validated by parse
+    char waveId[] = "WAVE";
+    WriteFile(hFile, riffId, 4, nullptr, nullptr);
+    WriteFile(hFile, &riffSize, 4, nullptr, nullptr);
+    WriteFile(hFile, waveId, 4, nullptr, nullptr);
+
+    // 1MB + 1 payload bytes (odd) plus its pad byte.
+    const uint32_t junkSize = 1024 * 1024 + 1;
+    char junkId[] = "JUNK";
+    WriteFile(hFile, junkId, 4, nullptr, nullptr);
+    WriteFile(hFile, &junkSize, 4, nullptr, nullptr);
+    std::vector<uint8_t> junk(junkSize + 1, 0);
+    WriteFile(hFile, junk.data(), static_cast<DWORD>(junk.size()), nullptr,
+              nullptr);
+
+    char fmtId[] = "fmt ";
+    uint32_t fmtSize = 16;
+    uint16_t audioFormat = 1;
+    uint16_t channels = 2;
+    uint32_t sampleRate = 44100;
+    uint32_t byteRate = 176400;
+    uint16_t blockAlign = 4;
+    uint16_t bitsPerSample = 16;
+    WriteFile(hFile, fmtId, 4, nullptr, nullptr);
+    WriteFile(hFile, &fmtSize, 4, nullptr, nullptr);
+    WriteFile(hFile, &audioFormat, 2, nullptr, nullptr);
+    WriteFile(hFile, &channels, 2, nullptr, nullptr);
+    WriteFile(hFile, &sampleRate, 4, nullptr, nullptr);
+    WriteFile(hFile, &byteRate, 4, nullptr, nullptr);
+    WriteFile(hFile, &blockAlign, 2, nullptr, nullptr);
+    WriteFile(hFile, &bitsPerSample, 2, nullptr, nullptr);
+    CloseHandle(hFile);
+
+    kessoku::audio::WavFormat fmt{};
+    std::string err = kessoku::audio::ParseWavFormat(name, fmt);
+    CHECK(err.empty(), "WAV with a >1MB leading chunk parses");
+    CHECK(fmt.sampleRate == 44100 && fmt.channelCount == 2 &&
+              fmt.bitsPerSample == 16,
+          "WAV format fields after a >1MB leading chunk");
+
+    DeleteFileW(name.data());
+    RemoveDirectoryW(tempDir.c_str());
+}
+
+// Test 25: FindDataChunk applied an arbitrary 100MB "sanity" cap to every
+// chunk, including 'data'. A 16-bit/44.1kHz stereo WAV passes 100MB after
+// ~10 minutes, and 24-bit/96kHz after ~3 minutes, so the cap rejected
+// ordinary music files before any audio setup.
+void RunLargeDataChunkTest() {
+    wchar_t buf[MAX_PATH]{};
+    DWORD len = GetTempPathW(MAX_PATH, buf);
+    if (len == 0 || len > MAX_PATH) {
+        return;
+    }
+    std::wstring tempDir = std::wstring(buf) + L"\\kessoku_test_player25_";
+    if (!CreateDirectoryW(tempDir.c_str(), nullptr) &&
+        GetLastError() != ERROR_ALREADY_EXISTS) {
+        return;
+    }
+    std::wstring wavPath = tempDir + L"\\long.wav";
+
+    const uint32_t bytesPerFrame = 2 * 2; // 16-bit, 2ch
+    const uint32_t dataChunkSize = 100u * 1024u * 1024u + 4u;
+    const uint32_t expectedFrames = dataChunkSize / bytesPerFrame;
+
+    HANDLE hFile = CreateFileW(
+        wavPath.data(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        const uint32_t riffSize = 36u + dataChunkSize;
+
+        char riffId[] = "RIFF";
+        char waveId[] = "WAVE";
+        WriteFile(hFile, riffId, 4, nullptr, nullptr);
+        WriteFile(hFile, &riffSize, 4, nullptr, nullptr);
+        WriteFile(hFile, waveId, 4, nullptr, nullptr);
+
+        char fmtId[] = "fmt ";
+        uint32_t fmtSize = 16;
+        uint16_t audioFormat = 1;
+        uint16_t channels = 2;
+        uint32_t sampleRate = 44100;
+        uint32_t byteRate = sampleRate * bytesPerFrame;
+        uint16_t blockAlign = static_cast<uint16_t>(bytesPerFrame);
+        uint16_t bitsPerSample = 16;
+        WriteFile(hFile, fmtId, 4, nullptr, nullptr);
+        WriteFile(hFile, &fmtSize, 4, nullptr, nullptr);
+        WriteFile(hFile, &audioFormat, 2, nullptr, nullptr);
+        WriteFile(hFile, &channels, 2, nullptr, nullptr);
+        WriteFile(hFile, &sampleRate, 4, nullptr, nullptr);
+        WriteFile(hFile, &byteRate, 4, nullptr, nullptr);
+        WriteFile(hFile, &blockAlign, 2, nullptr, nullptr);
+        WriteFile(hFile, &bitsPerSample, 2, nullptr, nullptr);
+
+        char dataId[] = "data";
+        WriteFile(hFile, dataId, 4, nullptr, nullptr);
+        WriteFile(hFile, &dataChunkSize, 4, nullptr, nullptr);
+
+        // Extend to the declared size without writing 100MB of zeros: the
+        // parser and Create() only read headers, and NTFS serves the
+        // unwritten tail as zeros.
+        LARGE_INTEGER finalSize;
+        finalSize.QuadPart = 44 + static_cast<LONGLONG>(dataChunkSize);
+        SetFilePointerEx(hFile, finalSize, nullptr, FILE_BEGIN);
+        SetEndOfFile(hFile);
+        CloseHandle(hFile);
+    }
+    CHECK(!wavPath.empty(), "Create >100MB-data-chunk WAV fixture");
+
+    if (!wavPath.empty()) {
+        auto result = kessoku::audio::Player::Create(wavPath);
+        if (result.IsErr() &&
+            IsEnvironmentSkipCode(result.GetError().code)) {
+            printf("SKIP: large-data-chunk test "
+                   "(no compatible exclusive-mode audio device)\n");
+        } else {
+            CHECK(result.IsOk(),
+                  "Player::Create accepts a data chunk over 100MB");
+        }
+        if (result.IsOk()) {
+            CHECK(result.Value().GetTotalFrames() == expectedFrames,
+                  "Total frames match the >100MB data chunk");
+            (void)result.Value().Stop();
+        }
+
+        DeleteFileW(wavPath.data());
+        RemoveDirectoryW(tempDir.c_str());
+    }
+}
+
 } // namespace
 
 int main() {
@@ -598,6 +753,9 @@ int main() {
             }
         }
     }
+
+    // --- Test 2c: a leading non-fmt chunk larger than 1MB is legal ---
+    RunBigLeadingChunkTest();
 
     // --- Test 3: Play → Pause → Resume → Stop state transitions ---
     {
@@ -1792,6 +1950,13 @@ int main() {
             CleanupTempFlac(flacPath);
         }
     }
+
+    // --- Test 25: data chunk larger than 100MB is a valid WAV ---
+    // Regression: FindDataChunk applied an arbitrary 100MB "sanity" cap to
+    // every chunk, including 'data'. A 16-bit/44.1kHz stereo WAV passes
+    // 100MB after ~10 minutes, and 24-bit/96kHz after ~3 minutes, so the cap
+    // rejected ordinary music files before any audio setup.
+    RunLargeDataChunkTest();
 
     std::wprintf(L"\n=== Results: %d failures ===\n", gFailures);
     return gFailures;

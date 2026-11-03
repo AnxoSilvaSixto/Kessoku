@@ -60,11 +60,15 @@ std::string ParseWavFormat(const std::wstring& path, WavFormat& out) {
             return "Invalid WAV file: cannot read chunk header";
         }
 
-        if (chunk.size > 1024 * 1024) {
-            return "Invalid WAV file: chunk size exceeds 1MB";
-        }
-
         if (std::memcmp(chunk.id, "fmt ", 4) == 0) {
+            // Only the fmt payload is read into memory, so the allocation
+            // sanity cap applies here and nowhere else. Non-fmt chunks are
+            // skipped by seek and may legitimately exceed 1MB (LIST, id3,
+            // JUNK) before fmt.
+            if (chunk.size > 1024 * 1024) {
+                return "Invalid WAV file: fmt chunk exceeds 1MB";
+            }
+
             std::vector<uint8_t> fmtData(chunk.size);
             if (!file.read(reinterpret_cast<char*>(fmtData.data()), chunk.size)) {
                 return "Invalid WAV file: cannot read fmt chunk";
