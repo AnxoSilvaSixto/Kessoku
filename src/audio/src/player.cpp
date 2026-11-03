@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cmath>
 #include <cstring>
 #include <cwctype>
 #include <exception>
@@ -24,14 +25,11 @@ kessoku::core::ErrorCode HResultToErrorCode(HRESULT hr) {
         case AUDCLNT_E_UNSUPPORTED_FORMAT:
             return kessoku::core::ErrorCode::FormatNotSupported;
         case AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED:
-            return kessoku::core::ErrorCode::ExclusiveModeUnavailable;
         case AUDCLNT_E_DEVICE_IN_USE:
             return kessoku::core::ErrorCode::ExclusiveModeUnavailable;
         case AUDCLNT_E_DEVICE_INVALIDATED:
-            return kessoku::core::ErrorCode::AudioInitFailed;
         case E_POINTER:
         case E_INVALIDARG:
-            return kessoku::core::ErrorCode::AudioInitFailed;
         default:
             return kessoku::core::ErrorCode::AudioInitFailed;
     }
@@ -421,9 +419,9 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
         UINT32 nFrames = 0;
         hr = pAudioClient->GetBufferSize(&nFrames);
         if (SUCCEEDED(hr)) {
-            hnsBufferDuration = static_cast<REFERENCE_TIME>(
-                (10000.0 * 1000.0 / static_cast<double>(fileFormat.sampleRate) *
-                 static_cast<double>(nFrames)) + 0.5);
+            hnsBufferDuration = static_cast<REFERENCE_TIME>(std::llround(
+                10000.0 * 1000.0 / static_cast<double>(fileFormat.sampleRate) *
+                static_cast<double>(nFrames)));
         }
         pAudioClient->Release();
         pDevice->Release();

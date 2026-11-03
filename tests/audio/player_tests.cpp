@@ -10,6 +10,7 @@
 #include <FLAC/stream_encoder.h>
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -334,10 +335,9 @@ bool QueryExclusiveBufferFrames(uint32_t sampleRate, uint16_t bitsPerSample,
         UINT32 nFrames = 0;
         hr = pAudioClient->GetBufferSize(&nFrames);
         if (SUCCEEDED(hr)) {
-            hnsBufferDuration = static_cast<REFERENCE_TIME>(
-                (10000.0 * 1000.0 / static_cast<double>(sampleRate) *
-                 static_cast<double>(nFrames)) +
-                0.5);
+            hnsBufferDuration = static_cast<REFERENCE_TIME>(std::llround(
+                10000.0 * 1000.0 / static_cast<double>(sampleRate) *
+                static_cast<double>(nFrames)));
         }
         cleanup(true);
 
@@ -1108,8 +1108,10 @@ int main() {
                 for (uint32_t i = 0; i < count; ++i) {
                     FLAC__int32 v =
                         kBase + static_cast<FLAC__int32>(first + i) * kStep;
-                    bytes.push_back(static_cast<uint8_t>(v & 0xFF));
-                    bytes.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+                    const auto sample = static_cast<uint32_t>(v);
+                    bytes.push_back(static_cast<uint8_t>(sample & 0xFFU));
+                    bytes.push_back(
+                        static_cast<uint8_t>((sample >> 8U) & 0xFFU));
                 }
                 return bytes;
             };

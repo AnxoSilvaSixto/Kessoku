@@ -163,6 +163,9 @@ std::wstring CreateMinimalWav(std::wstring_view dir, std::wstring_view name) {
 bool StampFlacTags(std::wstring_view path,
                    std::wstring_view title, std::wstring_view artist,
                    std::wstring_view album, unsigned int trackNum) {
+    // FileName only accepts wchar_t*/char*, so the wide string must be
+    // materialized; the analyzer misreads that as a redundant view round trip.
+    // NOLINTNEXTLINE(performance-string-view-conversions)
     TagLib::FLAC::File f(std::wstring(path).c_str(), false);
     if (!f.isValid()) return false;
 
@@ -170,7 +173,10 @@ bool StampFlacTags(std::wstring_view path,
     if (!title.empty()) props.insert("TITLE", WstrToTagLibString(title));
     if (!artist.empty()) props.insert("ARTIST", WstrToTagLibString(artist));
     if (!album.empty()) props.insert("ALBUM", WstrToTagLibString(album));
-    if (trackNum > 0) props.insert("TRACKNUMBER", TagLib::String::number(trackNum));
+    if (trackNum > 0) {
+        props.insert("TRACKNUMBER", TagLib::String::number(
+            static_cast<int>(trackNum)));
+    }
 
     TagLib::PropertyMap rejected = f.setProperties(props);
     if (!rejected.isEmpty()) return false;
@@ -182,6 +188,7 @@ bool StampFlacTags(std::wstring_view path,
 bool StampWavDirect(std::wstring_view path,
                     std::wstring_view title, std::wstring_view artist,
                     std::wstring_view album, unsigned int trackNum) {
+    // NOLINTNEXTLINE(performance-string-view-conversions): see StampFlacTags.
     TagLib::RIFF::WAV::File f(std::wstring(path).c_str(), true);
     if (!f.isValid()) return false;
 
@@ -189,7 +196,10 @@ bool StampWavDirect(std::wstring_view path,
     if (!title.empty()) props.insert("TITLE", WstrToTagLibString(title));
     if (!artist.empty()) props.insert("ARTIST", WstrToTagLibString(artist));
     if (!album.empty()) props.insert("ALBUM", WstrToTagLibString(album));
-    if (trackNum > 0) props.insert("TRACKNUMBER", TagLib::String::number(trackNum));
+    if (trackNum > 0) {
+        props.insert("TRACKNUMBER", TagLib::String::number(
+            static_cast<int>(trackNum)));
+    }
 
     TagLib::PropertyMap rejected = f.setProperties(props);
     if (!rejected.isEmpty()) return false;
@@ -201,6 +211,7 @@ bool StampWavDirect(std::wstring_view path,
 bool StampWavInfoTag(std::wstring_view path,
                      std::wstring_view title, std::wstring_view artist,
                      std::wstring_view album, unsigned int trackNum) {
+    // NOLINTNEXTLINE(performance-string-view-conversions): see StampFlacTags.
     TagLib::RIFF::WAV::File f(std::wstring(path).c_str(), true);
     if (!f.isValid()) return false;
 
@@ -419,7 +430,10 @@ int main() {
         std::wstring corruptedPath = std::wstring(root) + L"\\corrupted.flac";
         CreateFileInDir(root, L"corrupted.flac");
 
-        // Overwrite with garbage
+        // Overwrite with garbage.
+        // std::ios openmode flags are a bitmask enum; OR-ing them is the
+        // standard idiom, not a signed-integer bug.
+        // NOLINTNEXTLINE(bugprone-signed-bitwise)
         std::ofstream ofs(std::wstring(corruptedPath), std::ios::binary | std::ios::trunc);
         if (ofs) {
             const char* garbage = "this is not audio at all\x00\x01\x02";
@@ -447,6 +461,7 @@ int main() {
         std::wstring corruptedPath = std::wstring(root) + L"\\corrupted.wav";
         CreateFileInDir(root, L"corrupted.wav");
 
+        // NOLINTNEXTLINE(bugprone-signed-bitwise): std::ios openmode bitmask.
         std::ofstream ofs(std::wstring(corruptedPath), std::ios::binary | std::ios::trunc);
         if (ofs) {
             const char* garbage = "not a wav file\x00\xFF\xFE";
