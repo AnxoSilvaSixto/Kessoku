@@ -536,6 +536,69 @@ int main() {
         }
     }
 
+    // --- Test 2b: odd-sized RIFF chunks are padded before the next header ---
+    {
+        wchar_t buf[MAX_PATH]{};
+        DWORD len = GetTempPathW(MAX_PATH, buf);
+        if (len > 0 && len <= MAX_PATH) {
+            std::wstring tempDir =
+                std::wstring(buf) + L"\\kessoku_test_player2b_";
+            std::wstring name = tempDir + L"\\odd_chunk.wav";
+            if (CreateDirectoryW(tempDir.c_str(), nullptr) ||
+                GetLastError() == ERROR_ALREADY_EXISTS) {
+                HANDLE hFile = CreateFileW(
+                    name.data(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (hFile != INVALID_HANDLE_VALUE) {
+                    char riffId[] = "RIFF";
+                    uint32_t riffSize = 4 + (8 + 4) + (8 + 16);
+                    char waveId[] = "WAVE";
+                    WriteFile(hFile, riffId, 4, nullptr, nullptr);
+                    WriteFile(hFile, &riffSize, 4, nullptr, nullptr);
+                    WriteFile(hFile, waveId, 4, nullptr, nullptr);
+
+                    // Three payload bytes plus the mandatory pad byte.
+                    char junkId[] = "JUNK";
+                    uint32_t junkSize = 3;
+                    char junkPayload[] = { 'x', 'y', 'z', 0 };
+                    WriteFile(hFile, junkId, 4, nullptr, nullptr);
+                    WriteFile(hFile, &junkSize, 4, nullptr, nullptr);
+                    WriteFile(hFile, junkPayload, 4, nullptr, nullptr);
+
+                    char fmtId[] = "fmt ";
+                    uint32_t fmtSize = 16;
+                    uint16_t audioFormat = 1;
+                    uint16_t channels = 2;
+                    uint32_t sampleRate = 44100;
+                    uint32_t byteRate = 176400;
+                    uint16_t blockAlign = 4;
+                    uint16_t bitsPerSample = 16;
+                    WriteFile(hFile, fmtId, 4, nullptr, nullptr);
+                    WriteFile(hFile, &fmtSize, 4, nullptr, nullptr);
+                    WriteFile(hFile, &audioFormat, 2, nullptr, nullptr);
+                    WriteFile(hFile, &channels, 2, nullptr, nullptr);
+                    WriteFile(hFile, &sampleRate, 4, nullptr, nullptr);
+                    WriteFile(hFile, &byteRate, 4, nullptr, nullptr);
+                    WriteFile(hFile, &blockAlign, 2, nullptr, nullptr);
+                    WriteFile(hFile, &bitsPerSample, 2, nullptr, nullptr);
+                    CloseHandle(hFile);
+
+                    kessoku::audio::WavFormat fmt{};
+                    std::string err =
+                        kessoku::audio::ParseWavFormat(name, fmt);
+                    CHECK(err.empty(),
+                          "WAV with odd-sized leading chunk parses");
+                    CHECK(fmt.sampleRate == 44100 && fmt.channelCount == 2 &&
+                              fmt.bitsPerSample == 16,
+                          "WAV format fields after an odd-sized chunk");
+
+                    DeleteFileW(name.data());
+                    RemoveDirectoryW(tempDir.c_str());
+                }
+            }
+        }
+    }
+
     // --- Test 3: Play → Pause → Resume → Stop state transitions ---
     {
         std::wstring wavPath = CreateTempWav(

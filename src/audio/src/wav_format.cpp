@@ -103,8 +103,12 @@ std::string ParseWavFormat(const std::wstring& path, WavFormat& out) {
             return {}; // success
         }
 
-        // Skip this chunk
-        if (!file.seekg(chunk.size, std::ios::cur)) {
+        // Skip this chunk. RIFF chunks are word-aligned: an odd payload is
+        // followed by one pad byte that the chunk size does not count.
+        const std::streamoff skip =
+            static_cast<std::streamoff>(chunk.size) +
+            static_cast<std::streamoff>(chunk.size % 2);
+        if (!file.seekg(skip, std::ios::cur)) {
             return "Invalid WAV file: cannot skip chunk";
         }
     }
