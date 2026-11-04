@@ -293,6 +293,18 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
                 core::ErrorCode::FormatNotSupported,
                 "WAV channel count not supported in exclusive mode");
         }
+        // PCM block alignment must match the channel/bit-depth layout used
+        // below. A mismatch means the declared sample stride is not
+        // channels * bytes-per-sample; reading at the derived stride would
+        // play misaligned samples, so reject rather than emit garbage.
+        const uint16_t expectedBlockAlign = static_cast<uint16_t>(
+            fileFormat.channelCount * (fileFormat.bitsPerSample / 8));
+        if (fileFormat.blockAlign != expectedBlockAlign) {
+            return core::Result<Player>::Err(
+                core::ErrorCode::FormatNotSupported,
+                "WAV block alignment does not match its channel and bit "
+                "depth");
+        }
     }
 
     // Validate the WAV data chunk before touching audio hardware: an

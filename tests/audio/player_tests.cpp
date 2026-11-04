@@ -594,6 +594,76 @@ void RunLargeDataChunkTest() {
     }
 }
 
+// Test 26: a PCM WAV whose block alignment disagrees with its channel and
+// bit-depth fields cannot be read at the derived sample stride. Playing it
+// would emit misaligned samples, so Create() must reject it instead.
+void RunBlockAlignMismatchTest() {
+    wchar_t buf[MAX_PATH]{};
+    DWORD len = GetTempPathW(MAX_PATH, buf);
+    if (len == 0 || len > MAX_PATH) {
+        return;
+    }
+    std::wstring tempDir = std::wstring(buf) + L"\\kessoku_test_player26_";
+    if (!CreateDirectoryW(tempDir.c_str(), nullptr) &&
+        GetLastError() != ERROR_ALREADY_EXISTS) {
+        return;
+    }
+    std::wstring wavPath = tempDir + L"\\bad_align.wav";
+
+    HANDLE hFile = CreateFileW(
+        wavPath.data(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        const uint16_t channels = 2;
+        const uint16_t bitsPerSample = 16;
+        const uint16_t declaredBlockAlign = 8; // correct value is 4
+        const uint32_t sampleRate = 44100;
+        const uint32_t dataChunkSize = 3200;
+        const uint32_t riffSize = 36u + dataChunkSize;
+
+        char riffId[] = "RIFF";
+        char waveId[] = "WAVE";
+        WriteFile(hFile, riffId, 4, nullptr, nullptr);
+        WriteFile(hFile, &riffSize, 4, nullptr, nullptr);
+        WriteFile(hFile, waveId, 4, nullptr, nullptr);
+
+        char fmtId[] = "fmt ";
+        uint32_t fmtSize = 16;
+        uint16_t audioFormat = 1;
+        uint32_t byteRate = sampleRate * declaredBlockAlign;
+        WriteFile(hFile, fmtId, 4, nullptr, nullptr);
+        WriteFile(hFile, &fmtSize, 4, nullptr, nullptr);
+        WriteFile(hFile, &audioFormat, 2, nullptr, nullptr);
+        WriteFile(hFile, &channels, 2, nullptr, nullptr);
+        WriteFile(hFile, &sampleRate, 4, nullptr, nullptr);
+        WriteFile(hFile, &byteRate, 4, nullptr, nullptr);
+        WriteFile(hFile, &declaredBlockAlign, 2, nullptr, nullptr);
+        WriteFile(hFile, &bitsPerSample, 2, nullptr, nullptr);
+
+        char dataId[] = "data";
+        WriteFile(hFile, dataId, 4, nullptr, nullptr);
+        WriteFile(hFile, &dataChunkSize, 4, nullptr, nullptr);
+        std::vector<uint8_t> payload(dataChunkSize, 0);
+        WriteFile(hFile, payload.data(), dataChunkSize, nullptr, nullptr);
+        CloseHandle(hFile);
+    }
+    CHECK(!wavPath.empty(), "Create mismatched-blockAlign WAV fixture");
+
+    if (!wavPath.empty()) {
+        auto result = kessoku::audio::Player::Create(wavPath);
+        CHECK(result.IsErr(),
+              "Player::Create rejects a mismatched WAV blockAlign");
+        if (result.IsErr()) {
+            CHECK(result.GetError().code ==
+                      kessoku::core::ErrorCode::FormatNotSupported,
+                  "Mismatched blockAlign is FormatNotSupported");
+        }
+
+        DeleteFileW(wavPath.data());
+        RemoveDirectoryW(tempDir.c_str());
+    }
+}
+
 } // namespace
 
 int main() {
@@ -1957,6 +2027,9 @@ int main() {
     // 100MB after ~10 minutes, and 24-bit/96kHz after ~3 minutes, so the cap
     // rejected ordinary music files before any audio setup.
     RunLargeDataChunkTest();
+
+    // --- Test 26: mismatched WAV block alignment is rejected ---
+    RunBlockAlignMismatchTest();
 
     std::wprintf(L"\n=== Results: %d failures ===\n", gFailures);
     return gFailures;
