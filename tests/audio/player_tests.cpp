@@ -824,6 +824,75 @@ void RunPrematureFlacEndTest() {
     }
 }
 
+// Test 29: a WAV truncated after Create() must end playback instead of
+// spinning in Playing. Create() validates the data chunk against the file
+// size, but the file can shrink before Play() opens it. ReadFile at EOF
+// succeeds with zero bytes, which ReadFrames reported as "no frames" without
+// flagging an error, so more stayed true and the render loop waited forever
+// for samples that no longer exist.
+bool TruncateFile(std::wstring_view path, uint64_t newSize) {
+    HANDLE hFile = CreateFileW(path.data(), GENERIC_WRITE, 0, nullptr,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    LARGE_INTEGER pos;
+    pos.QuadPart = static_cast<LONGLONG>(newSize);
+    const bool ok = SetFilePointerEx(hFile, pos, nullptr, FILE_BEGIN) != 0 &&
+                    SetEndOfFile(hFile) != 0;
+    CloseHandle(hFile);
+    return ok;
+}
+
+void RunWavTruncatedAfterCreateTest() {
+    std::wstring wavPath = CreateTempWav(
+        L"\\kessoku_test_player29_", 44100, 16, 2, 44100);
+    CHECK(!wavPath.empty(),
+          "Create temp WAV for post-create truncation test");
+    if (wavPath.empty()) {
+        return;
+    }
+
+    auto result = kessoku::audio::Player::Create(wavPath);
+    if (result.IsErr() && IsEnvironmentSkipCode(result.GetError().code)) {
+        printf("SKIP: post-create truncation test "
+               "(no compatible exclusive-mode audio device)\n");
+    } else {
+        CHECK(result.IsOk(), "Player::Create succeeds before truncation");
+    }
+
+    if (result.IsOk()) {
+        auto& player = result.Value();
+        // Keep the RIFF/fmt/data headers (44 bytes) and drop every sample;
+        // Create() has already validated the now-stale data chunk size.
+        const bool truncated = TruncateFile(wavPath, 44);
+        CHECK(truncated, "Truncate WAV after Create()");
+
+        auto playStatus = player.Play();
+        CHECK(playStatus.IsOk(), "Play() for post-create truncated WAV");
+
+        bool leftPlaying = false;
+        for (int i = 0; i < 60; ++i) {
+            if (player.GetState() !=
+                kessoku::audio::PlaybackState::Playing) {
+                leftPlaying = true;
+                break;
+            }
+            Sleep(50);
+        }
+        CHECK(leftPlaying,
+              "Player leaves Playing after post-create WAV truncation");
+        if (leftPlaying) {
+            CHECK(player.GetState() ==
+                      kessoku::audio::PlaybackState::Stopped,
+                  "Truncated WAV lands in Stopped");
+        }
+        (void)player.Stop();
+    }
+
+    CleanupTempWav(wavPath);
+}
+
 } // namespace
 
 int main() {
@@ -2197,6 +2266,9 @@ int main() {
     // --- Test 28: playback stops at the real FLAC end even when STREAMINFO
     // --- declares more samples ---
     RunPrematureFlacEndTest();
+
+    // --- Test 29: a WAV truncated after Create() ends instead of spinning ---
+    RunWavTruncatedAfterCreateTest();
 
     std::wprintf(L"\n=== Results: %d failures ===\n", gFailures);
     return gFailures;

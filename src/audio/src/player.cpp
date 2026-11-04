@@ -1087,10 +1087,18 @@ uint32_t Player::ReadFrames(uint8_t* buffer, uint32_t maxFrames) {
 
     if (framesToRead == 0) return 0;
 
+    const uint32_t bytesRequested = framesToRead * bytesPerFrame_;
     DWORD bytesRead = 0;
-    if (!ReadFile(hFile_, buffer, framesToRead * bytesPerFrame_, &bytesRead, nullptr)) {
+    if (!ReadFile(hFile_, buffer, bytesRequested, &bytesRead, nullptr)) {
         audioError_ = true;
         return 0;
+    }
+    // A short read means the file ended before the data chunk Create()
+    // validated (it shrank after that check). Reading on would replay
+    // misaligned partial frames or, at a clean EOF, spin forever writing
+    // silence while more stays true. Flag it like any other read failure.
+    if (bytesRead != bytesRequested) {
+        audioError_ = true;
     }
 
     filePosition_ += bytesRead;
