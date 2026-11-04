@@ -301,6 +301,11 @@ bool FlacReader::HadError() const {
     return error_;
 }
 
+bool FlacReader::ReachedEnd() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return eof_;
+}
+
 bool FlacReader::PushDecodedFrame(uint32_t frameChannels,
                                   uint32_t frameBitsPerSample,
                                   uint32_t blockSize,

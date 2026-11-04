@@ -1148,14 +1148,18 @@ bool Player::RenderIteration() {
         more = (currentFrame_ < totalFrames_);
 
         // Distinguish "stream ended" from "decode/read error": when
-        // ReadFrames returns 0 and an error flag is set, currentFrame_
-        // has not advanced, so the natural more = (currentFrame_ <
-        // totalFrames_) would still be true and the render loop would
-        // spin forever writing silence. Treat a flagged error the same
-        // way as natural end-of-stream so the loop exits cleanly.
-        if (framesRead == 0 &&
-            (sourceKind_ == SourceKind::Flac ? flacReader_.HadError()
-                                             : audioError_)) {
+        // ReadFrames returns 0 without advancing currentFrame_, the
+        // natural more = (currentFrame_ < totalFrames_) would still be
+        // true and the render loop would spin forever writing silence.
+        // That happens on a flagged read/decode error, and also when a
+        // FLAC stream reaches a clean EOS before its STREAMINFO-declared
+        // total_samples (overstated header / truncated frames). Treat both
+        // as end-of-stream so the loop exits cleanly.
+        const bool sourceEnded =
+            sourceKind_ == SourceKind::Flac
+                ? (flacReader_.HadError() || flacReader_.ReachedEnd())
+                : audioError_;
+        if (framesRead == 0 && sourceEnded) {
             more = false;
         }
     }

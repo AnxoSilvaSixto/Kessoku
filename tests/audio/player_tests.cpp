@@ -720,6 +720,110 @@ void RunComApartmentOwnershipTest() {
     CleanupTempWav(wavPath);
 }
 
+// Test 28: a FLAC whose STREAMINFO claims more samples than the stream
+// actually contains must stop at the real end of stream. The decoder reaches
+// a clean EOS while currentFrame_ < totalFrames_; treating that as "more data
+// coming" leaves the render loop writing silence in Playing forever.
+//
+// Patch the 36-bit total-samples field in STREAMINFO. Layout: "fLaC",
+// block header (1 byte type + 3-byte length), then STREAMINFO. The packed
+// sample-rate/channels/depth/total-samples field starts 10 bytes into
+// STREAMINFO, so total_samples occupies file offsets 18..25 (big-endian,
+// low 36 bits).
+bool PatchFlacTotalSamples(std::wstring_view path, uint64_t totalSamples) {
+    HANDLE hFile = CreateFileW(path.data(), GENERIC_READ | GENERIC_WRITE, 0,
+                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                               nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    constexpr DWORD kPackedFieldOffset = 18;
+    constexpr uint64_t kTotalSamplesMask = 0xFFFFFFFFFULL; // low 36 bits
+
+    uint8_t header[kPackedFieldOffset + 8]{};
+    DWORD bytesRead = 0;
+    bool ok = false;
+    if (ReadFile(hFile, header, sizeof(header), &bytesRead, nullptr) &&
+        bytesRead == sizeof(header) &&
+        std::memcmp(header, "fLaC", 4) == 0 &&
+        (static_cast<unsigned>(header[4]) & 0x7Fu) == 0 /* STREAMINFO */) {
+        uint64_t packed = 0;
+        for (DWORD i = 0; i < 8; ++i) {
+            packed = (packed << uint64_t{8}) |
+                     static_cast<uint64_t>(header[kPackedFieldOffset + i]);
+        }
+        packed = (packed & ~kTotalSamplesMask) |
+                 (totalSamples & kTotalSamplesMask);
+
+        uint8_t patched[8]{};
+        for (int i = 7; i >= 0; --i) {
+            patched[i] = static_cast<uint8_t>(packed & uint64_t{0xFF});
+            packed >>= uint64_t{8};
+        }
+
+        LARGE_INTEGER offset;
+        offset.QuadPart = kPackedFieldOffset;
+        ok = SetFilePointerEx(hFile, offset, nullptr, FILE_BEGIN) != 0 &&
+             WriteFile(hFile, patched, sizeof(patched), nullptr, nullptr) != 0;
+    }
+
+    CloseHandle(hFile);
+    return ok;
+}
+
+void RunPrematureFlacEndTest() {
+    std::wstring flacPath = CreateTempFlac(
+        L"\\kessoku_test_player28_", 44100, 16, 2, 44100);
+    CHECK(!flacPath.empty(), "Create temp FLAC for premature-end test");
+    if (flacPath.empty()) {
+        return;
+    }
+
+    const bool patched = PatchFlacTotalSamples(flacPath, 88200);
+    CHECK(patched, "Patch FLAC STREAMINFO total samples");
+
+    if (patched) {
+        auto result = kessoku::audio::Player::Create(flacPath);
+        if (result.IsErr() &&
+            IsEnvironmentSkipCode(result.GetError().code)) {
+            printf("SKIP: premature FLAC end test "
+                   "(no compatible exclusive-mode audio device)\n");
+        } else {
+            CHECK(result.IsOk(),
+                  "Player::Create succeeds for patched FLAC");
+        }
+
+        if (result.IsOk()) {
+            auto& player = result.Value();
+            auto playStatus = player.Play();
+            CHECK(playStatus.IsOk(), "Play() for premature-end FLAC");
+
+            // One second of real audio against a two-second declared total.
+            // With the defect the render loop never leaves Playing.
+            bool leftPlaying = false;
+            for (int i = 0; i < 100; ++i) {
+                if (player.GetState() !=
+                    kessoku::audio::PlaybackState::Playing) {
+                    leftPlaying = true;
+                    break;
+                }
+                Sleep(50);
+            }
+            CHECK(leftPlaying,
+                  "Player leaves Playing after the real FLAC end");
+            if (leftPlaying) {
+                CHECK(player.GetState() ==
+                          kessoku::audio::PlaybackState::Stopped,
+                      "Premature FLAC end lands in Stopped");
+            }
+            (void)player.Stop();
+        }
+
+        CleanupTempFlac(flacPath);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -2089,6 +2193,10 @@ int main() {
 
     // --- Test 27: Stop() must not consume a caller-owned COM apartment ---
     RunComApartmentOwnershipTest();
+
+    // --- Test 28: playback stops at the real FLAC end even when STREAMINFO
+    // --- declares more samples ---
+    RunPrematureFlacEndTest();
 
     std::wprintf(L"\n=== Results: %d failures ===\n", gFailures);
     return gFailures;

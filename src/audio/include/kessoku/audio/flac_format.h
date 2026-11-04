@@ -72,6 +72,12 @@ public:
     bool IsOpen() const;
     bool HadError() const;
 
+    // True once the decoder reached a clean end of stream. Needed separately
+    // from HadError(): a file whose STREAMINFO total_samples overstates the
+    // real sample count ends without a decode error, but playback must still
+    // finish instead of waiting for frames that will never arrive.
+    bool ReachedEnd() const;
+
     // libFLAC C-callback entry points (called synchronously from inside
     // ReadFrames/Open on the decoding thread). Public only because C
     // callbacks cannot be private members; not part of the usable API.
