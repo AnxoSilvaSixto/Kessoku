@@ -737,7 +737,14 @@ core::Status Player::Seek(uint32_t frameOffset) {
         {
             std::lock_guard<std::mutex> lock(positionMutex_);
             currentFrame_ = frameOffset;
-            if (!flacReader_.Seek(frameOffset)) {
+            // libFLAC rejects seek_absolute(sample >= total_samples), but
+            // totalFrames_ is a legitimate end position here: the seek bar's
+            // maximum maps to it, and no frame is decoded there. The next
+            // RenderIteration sees zero remaining and ends the stream, so
+            // skip the decoder seek instead of turning "seek to end" into an
+            // error. A later backwards seek repositions the decoder and
+            // clears its buffer anyway.
+            if (frameOffset < totalFrames_ && !flacReader_.Seek(frameOffset)) {
                 // Decoder was flushed back to a usable state; the stream
                 // stays paused so the caller can Resume() or Stop().
                 return core::Result<void>::Err(

@@ -893,6 +893,53 @@ void RunWavTruncatedAfterCreateTest() {
     CleanupTempWav(wavPath);
 }
 
+// Test 30: seeking to the end of a FLAC must succeed. libFLAC rejects
+// seek_absolute(sample >= total_samples), but totalFrames is a legitimate
+// end position: the seek bar's maximum maps to exactly GetTotalFrames(),
+// and no frame is decoded there. Without this, dragging the thumb fully
+// right reports "seek failed" and leaves the transport paused, while the
+// same position on a WAV is accepted.
+void RunFlacSeekToEndTest() {
+    std::wstring flacPath = CreateTempFlac(
+        L"\\kessoku_test_player30_", 44100, 16, 2, 4410);
+    CHECK(!flacPath.empty(), "Create temp FLAC for seek-to-end test");
+    if (flacPath.empty()) {
+        return;
+    }
+
+    auto result = kessoku::audio::Player::Create(flacPath);
+    if (result.IsErr() && IsEnvironmentSkipCode(result.GetError().code)) {
+        printf("SKIP: FLAC seek-to-end test "
+               "(no compatible exclusive-mode audio device)\n");
+    } else {
+        CHECK(result.IsOk(), "Player::Create for FLAC seek-to-end test");
+    }
+
+    if (result.IsOk()) {
+        auto& player = result.Value();
+        CHECK(player.Play().IsOk(), "Play() for FLAC seek-to-end test");
+        Sleep(50);
+
+        const uint32_t total = player.GetTotalFrames();
+        CHECK(total > 0, "FLAC total frames is non-zero");
+
+        CHECK(player.Pause().IsOk(), "Pause() before FLAC seek-to-end");
+        CHECK(player.GetState() == kessoku::audio::PlaybackState::Paused,
+              "FLAC state is Paused before seek-to-end");
+
+        auto seekStatus = player.Seek(total);
+        CHECK(seekStatus.IsOk(), "FLAC Seek(totalFrames) succeeds");
+        CHECK(player.GetPosition() == total,
+              "FLAC position is totalFrames after seek-to-end");
+        CHECK(player.GetState() == kessoku::audio::PlaybackState::Paused,
+              "FLAC state stays Paused after seek-to-end");
+
+        (void)player.Stop();
+    }
+
+    CleanupTempFlac(flacPath);
+}
+
 } // namespace
 
 int main() {
@@ -2269,6 +2316,9 @@ int main() {
 
     // --- Test 29: a WAV truncated after Create() ends instead of spinning ---
     RunWavTruncatedAfterCreateTest();
+
+    // --- Test 30: seeking to the end of a FLAC succeeds ---
+    RunFlacSeekToEndTest();
 
     std::wprintf(L"\n=== Results: %d failures ===\n", gFailures);
     return gFailures;
