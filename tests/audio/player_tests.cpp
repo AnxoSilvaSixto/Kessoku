@@ -664,6 +664,62 @@ void RunBlockAlignMismatchTest() {
     }
 }
 
+// Test 27: Create() must not uninitialize a COM apartment it did not
+// initialize. On a thread already initialized as MTA, the internal
+// CoInitializeEx() returns RPC_E_CHANGED_MODE without incrementing the
+// thread's init count. Stop() must leave that apartment initialized; an
+// unconditional CoUninitialize() would consume the caller's own init and
+// unbalance the caller's matching CoUninitialize().
+void RunComApartmentOwnershipTest() {
+    std::wstring wavPath = CreateTempWav(
+        L"\\kessoku_test_player27_", 44100, 16, 2, 44100);
+    CHECK(!wavPath.empty(), "Create temp WAV for COM ownership test");
+    if (wavPath.empty()) {
+        return;
+    }
+
+    // Requires COM uninitialized on this thread so the MTA init succeeds
+    // outright; otherwise the precondition cannot be established.
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (hr != S_OK) {
+        printf("SKIP: COM ownership test "
+               "(thread already COM-initialized)\n");
+        CleanupTempWav(wavPath);
+        return;
+    }
+
+    auto result = kessoku::audio::Player::Create(wavPath);
+    if (result.IsErr()) {
+        if (IsEnvironmentSkipCode(result.GetError().code)) {
+            printf("SKIP: COM ownership test "
+                   "(no compatible exclusive-mode audio device)\n");
+        } else {
+            CHECK(result.IsOk(),
+                  "Player::Create succeeds on an MTA-initialized thread");
+        }
+    } else {
+        auto& player = result.Value();
+        CHECK(player.Stop().IsOk(),
+              "Stop succeeds for a Player created on an MTA thread");
+
+        APTTYPE apartmentType = APTTYPE_CURRENT;
+        APTTYPEQUALIFIER qualifier = APTTYPEQUALIFIER_NONE;
+        CHECK(SUCCEEDED(CoGetApartmentType(&apartmentType, &qualifier)),
+              "Stop() leaves the caller-owned COM apartment initialized");
+    }
+
+    // Balance only if COM is still initialized: the buggy path has already
+    // consumed this thread's init, and a second CoUninitialize() would be
+    // equally unbalanced.
+    APTTYPE apartmentType = APTTYPE_CURRENT;
+    APTTYPEQUALIFIER qualifier = APTTYPEQUALIFIER_NONE;
+    if (SUCCEEDED(CoGetApartmentType(&apartmentType, &qualifier))) {
+        CoUninitialize();
+    }
+
+    CleanupTempWav(wavPath);
+}
+
 } // namespace
 
 int main() {
@@ -2030,6 +2086,9 @@ int main() {
 
     // --- Test 26: mismatched WAV block alignment is rejected ---
     RunBlockAlignMismatchTest();
+
+    // --- Test 27: Stop() must not consume a caller-owned COM apartment ---
+    RunComApartmentOwnershipTest();
 
     std::wprintf(L"\n=== Results: %d failures ===\n", gFailures);
     return gFailures;

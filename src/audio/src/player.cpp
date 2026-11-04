@@ -325,6 +325,12 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
     }
 
     HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    // A thread must balance every successful CoInitializeEx() with one
+    // CoUninitialize(), including a call that returns S_FALSE (already
+    // initialized with the same model). RPC_E_CHANGED_MODE means another
+    // apartment already owns this thread: COM is usable, but that call did
+    // not increment the count, so teardown must not decrement it.
+    bool ownsComInit = SUCCEEDED(hr);
     if (hr == RPC_E_CHANGED_MODE) {
         hr = S_OK;
     }
@@ -333,6 +339,12 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
             core::ErrorCode::AudioInitFailed,
             "COM initialization failed");
     }
+    const auto uninitIfOwned = [&ownsComInit] {
+        if (ownsComInit) {
+            CoUninitialize();
+            ownsComInit = false;
+        }
+    };
 
     IMMDeviceEnumerator* pEnumerator = nullptr;
     hr = CoCreateInstance(
@@ -340,7 +352,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
         CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
         reinterpret_cast<void**>(&pEnumerator));
     if (FAILED(hr) || pEnumerator == nullptr) {
-        CoUninitialize();
+        uninitIfOwned();
         return core::Result<Player>::Err(
             core::ErrorCode::DeviceNotFound,
             "Could not create device enumerator");
@@ -350,7 +362,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
     hr = pEnumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &pDevice);
     if (FAILED(hr) || pDevice == nullptr) {
         pEnumerator->Release();
-        CoUninitialize();
+        uninitIfOwned();
         return core::Result<Player>::Err(
             core::ErrorCode::DeviceNotFound,
             "Could not get default render device");
@@ -363,7 +375,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
     if (FAILED(hr) || pAudioClient == nullptr) {
         pDevice->Release();
         pEnumerator->Release();
-        CoUninitialize();
+        uninitIfOwned();
         return core::Result<Player>::Err(
             core::ErrorCode::AudioInitFailed,
             "Could not activate audio client");
@@ -388,7 +400,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
         pAudioClient->Release();
         pDevice->Release();
         pEnumerator->Release();
-        CoUninitialize();
+        uninitIfOwned();
         return core::Result<Player>::Err(
             core::ErrorCode::FormatNotSupported,
             std::string("Device does not support this ") + formatKind +
@@ -397,7 +409,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
         pAudioClient->Release();
         pDevice->Release();
         pEnumerator->Release();
-        CoUninitialize();
+        uninitIfOwned();
         return core::Result<Player>::Err(
             HResultToErrorCode(hr),
             "IsFormatSupported failed: 0x" + std::to_string(static_cast<unsigned long>(hr)));
@@ -409,7 +421,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
         pAudioClient->Release();
         pDevice->Release();
         pEnumerator->Release();
-        CoUninitialize();
+        uninitIfOwned();
         return core::Result<Player>::Err(
             core::ErrorCode::AudioInitFailed,
             "Could not get device period");
@@ -436,14 +448,17 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
         pAudioClient->Release();
         pDevice->Release();
         pEnumerator->Release();
-        CoUninitialize();
+        uninitIfOwned();
 
         // Re-enter COM: the teardown above balanced the CoInitializeEx at
         // the top of Create(), so the re-created device objects below need
         // a fresh apartment (otherwise CoCreateInstance fails with
         // CO_E_NOTINITIALIZED and every device needing buffer-size
-        // alignment becomes unusable).
+        // alignment becomes unusable). When the caller's apartment owns the
+        // thread (RPC_E_CHANGED_MODE), nothing was balanced and the re-init
+        // is not counted either.
         hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        ownsComInit = SUCCEEDED(hr);
         if (hr == RPC_E_CHANGED_MODE) {
             hr = S_OK;
         }
@@ -458,6 +473,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
             CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
             reinterpret_cast<void**>(&pEnumerator));
         if (FAILED(hr)) {
+            uninitIfOwned();
             return core::Result<Player>::Err(
                 core::ErrorCode::AudioInitFailed,
                 "Re-init failed after buffer alignment");
@@ -466,7 +482,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
         hr = pEnumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &pDevice);
         if (FAILED(hr)) {
             pEnumerator->Release();
-            CoUninitialize();
+            uninitIfOwned();
             return core::Result<Player>::Err(
                 core::ErrorCode::DeviceNotFound,
                 "Could not get default render device (re-init)");
@@ -478,7 +494,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
         if (FAILED(hr)) {
             pDevice->Release();
             pEnumerator->Release();
-            CoUninitialize();
+            uninitIfOwned();
             return core::Result<Player>::Err(
                 core::ErrorCode::AudioInitFailed,
                 "Could not activate audio client (re-init)");
@@ -497,7 +513,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
         pAudioClient->Release();
         pDevice->Release();
         pEnumerator->Release();
-        CoUninitialize();
+        uninitIfOwned();
         return core::Result<Player>::Err(
             HResultToErrorCode(hr),
             "IAudioClient::Initialize failed: 0x" +
@@ -510,7 +526,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
         pAudioClient->Release();
         pDevice->Release();
         pEnumerator->Release();
-        CoUninitialize();
+        uninitIfOwned();
         return core::Result<Player>::Err(
             core::ErrorCode::AudioInitFailed,
             "Could not get buffer size");
@@ -521,7 +537,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
         pAudioClient->Release();
         pDevice->Release();
         pEnumerator->Release();
-        CoUninitialize();
+        uninitIfOwned();
         return core::Result<Player>::Err(
             core::ErrorCode::AudioInitFailed,
             "Could not create event handle");
@@ -533,7 +549,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
         pAudioClient->Release();
         pDevice->Release();
         pEnumerator->Release();
-        CoUninitialize();
+        uninitIfOwned();
         return core::Result<Player>::Err(
             core::ErrorCode::AudioInitFailed,
             "Could not set event handle");
@@ -548,7 +564,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
         pAudioClient->Release();
         pDevice->Release();
         pEnumerator->Release();
-        CoUninitialize();
+        uninitIfOwned();
         return core::Result<Player>::Err(
             core::ErrorCode::AudioInitFailed,
             "Could not get IAudioRenderClient");
@@ -568,7 +584,8 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
     player.bytesPerFrame_ = bytesPerFrame;
     player.dataChunkOffset_ = dataChunkOffset;
     player.dataChunkSize_ = dataChunkSize;
-    player.ownsCom_ = true;
+    player.ownsCom_ = ownsComInit;
+    ownsComInit = false; // ownership transferred to the Player
     player.ownerThreadId_ = static_cast<uint32_t>(::GetCurrentThreadId());
 
     return core::Result<Player>::Ok(std::move(player));
