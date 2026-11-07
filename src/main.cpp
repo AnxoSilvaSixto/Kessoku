@@ -370,9 +370,21 @@ private:
         if (state == kessoku::audio::PlaybackState::Playing) {
             auto status = m_player->Pause();
             if (status.IsErr()) {
-                ::MessageBoxW(m_hWnd,
-                            WidenErrorMessage(status.GetError().message).c_str(),
-                            L"Playback error", MB_OK | MB_ICONERROR);
+                // Pause() can lose a race with natural end-of-stream: the
+                // render thread latches Stopped under the same lock Pause()
+                // takes before publishing Paused. That is a normal finish,
+                // not a playback error.
+                const auto postState = m_player->GetState();
+                if (postState == kessoku::audio::PlaybackState::Stopped) {
+                    PollPlayer();
+                } else if (postState ==
+                           kessoku::audio::PlaybackState::DeviceLost) {
+                    OnDeviceLost();
+                } else {
+                    ::MessageBoxW(m_hWnd,
+                                WidenErrorMessage(status.GetError().message).c_str(),
+                                L"Playback error", MB_OK | MB_ICONERROR);
+                }
             } else {
                 m_statusLabel.SetWindowTextW(L"Paused");
             }

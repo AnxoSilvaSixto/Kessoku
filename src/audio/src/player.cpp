@@ -676,6 +676,18 @@ core::Status Player::Pause() {
     // between iterations instead of in the middle of one, so no
     // GetBuffer/ReleaseBuffer can straddle the stopped stream.
     std::lock_guard<std::mutex> renderLock(renderMutex_);
+
+    // Re-check under the lock: the render thread latches Stopped (or
+    // DeviceLost) under this same lock when the stream ends. If it won that
+    // race after the check above, publishing Paused here would leave a
+    // paused player with no render thread, and Resume() could never revive
+    // it: Start() would succeed and the state would read Playing while no
+    // thread ever fills the buffer again.
+    if (state_.load() != PlaybackState::Playing) {
+        return core::Result<void>::Err(
+            core::ErrorCode::AudioInitFailed,
+            "Player not in Playing state");
+    }
     state_ = PlaybackState::Paused;
 
     IAudioClient* pAc = reinterpret_cast<IAudioClient*>(pAudioClient_);
@@ -937,22 +949,36 @@ void Player::RenderThreadEntry() {
         }
     }
 
-    // Fill the first buffer before starting.
-    RenderIteration();
+    // Fill the first buffer before starting. A false result means the
+    // stream already ended (or hit a terminal buffer error) before Start():
+    // RenderIteration latched Stopped/DeviceLost under renderMutex_ and the
+    // client must not be started.
+    if (!RenderIteration()) {
+        return;
+    }
 
     IAudioClient* pAc = reinterpret_cast<IAudioClient*>(pAudioClient_);
-    HRESULT hr = pAc->Start();
-    if (FAILED(hr)) {
-        // A dead device or dead audio service at startup must stay
-        // DeviceLost, distinct from a clean Stopped exit (same rule as the
-        // loop-exit preservation below).
-        if (IsDeviceGone(hr) ||
-            state_.load() == PlaybackState::DeviceLost) {
-            HandleDeviceLost();
-        } else {
-            state_ = PlaybackState::Stopped;
+    {
+        // Serialize Start with Pause(): Pause() publishes Paused and stops
+        // the client under renderMutex_. If it lands between the first fill
+        // and this call, starting here would leave the client running while
+        // the player is Paused. Resume() starts the client itself.
+        std::lock_guard<std::mutex> renderLock(renderMutex_);
+        if (state_.load() == PlaybackState::Playing) {
+            HRESULT hr = pAc->Start();
+            if (FAILED(hr)) {
+                // A dead device or dead audio service at startup must stay
+                // DeviceLost, distinct from a clean Stopped exit (same rule
+                // as the loop-exit preservation below).
+                if (IsDeviceGone(hr) ||
+                    state_.load() == PlaybackState::DeviceLost) {
+                    HandleDeviceLost();
+                } else {
+                    state_ = PlaybackState::Stopped;
+                }
+                return;
+            }
         }
-        return;
     }
 
     // hEvent_ is signaled by the audio engine when a buffer is ready (and
@@ -1047,23 +1073,10 @@ void Player::RenderThreadEntry() {
         }
     }
 
-    // Drain only on a clean Playing exit (end-of-stream): let the last
-    // buffer play, then stop the client. On a Stop()-requested exit the
-    // client is already stopped (Stop() did it before joining), and on a
-    // DeviceLost exit the device is dead — calling into it again only delays
-    // the join, so skip straight to the exit-reason preservation below.
-    // A Paused thread never reaches here on its own (only via Stop/DeviceLost
-    // above); defensively, any non-Playing reason is left untouched so
-    // DeviceLost stays distinct from Stopped. EOS is Playing -> Stopped.
-    if (state_.load() == PlaybackState::Playing) {
-        REFERENCE_TIME hnsPeriod = 0;
-        pAc->GetDevicePeriod(nullptr, &hnsPeriod);
-        Sleep(static_cast<DWORD>(hnsPeriod / 10000));
-
-        pAc->Stop();
-
-        state_ = PlaybackState::Stopped;
-    }
+    // Every exit above either preserved a terminal state already latched by
+    // Stop()/Pause() (or the device-loss paths), or came from a
+    // RenderIteration() that latched Stopped/DeviceLost itself while still
+    // holding renderMutex_. Nothing is left to drain here.
 }
 
 Player::~Player() {
@@ -1164,9 +1177,7 @@ bool Player::RenderIteration() {
     BYTE* pData = nullptr;
     HRESULT hr = pRC->GetBuffer(bufferFrameCount_, &pData);
     if (FAILED(hr) || pData == nullptr) {
-        if (IsDeviceGone(hr)) {
-            HandleDeviceLost();
-        }
+        FinishStreamLocked(IsDeviceGone(hr));
         return false;
     }
 
@@ -1231,13 +1242,41 @@ bool Player::RenderIteration() {
 
     hr = pRC->ReleaseBuffer(numFramesWritten, flags);
     if (FAILED(hr)) {
-        if (IsDeviceGone(hr)) {
-            HandleDeviceLost();
-        }
+        FinishStreamLocked(IsDeviceGone(hr));
         return false;
     }
 
+    if (!more) {
+        // End of stream. Latch the terminal state while still holding
+        // renderMutex_: Pause() publishes Paused under this same lock, so
+        // it cannot land between this last render pass and the state store.
+        // Otherwise a Pause() racing the end of the track could leave the
+        // player Paused with no render thread and no way for Resume() to
+        // restart the buffer-event stream.
+        FinishStreamLocked(false);
+    }
     return more;
+}
+
+void Player::FinishStreamLocked(bool deviceGone) {
+    if (deviceGone) {
+        // Dead endpoint: do not call into it again, and keep DeviceLost
+        // distinct from a clean end of stream.
+        state_ = PlaybackState::DeviceLost;
+        return;
+    }
+
+    // Let the last buffer play before stopping the client so the final
+    // audio is not truncated. A concurrent Stop() also stores Stopped and
+    // then joins this thread before releasing the client, so the calls
+    // below remain safe and Stop() itself is idempotent.
+    IAudioClient* pAc = reinterpret_cast<IAudioClient*>(pAudioClient_);
+    REFERENCE_TIME hnsPeriod = 0;
+    pAc->GetDevicePeriod(nullptr, &hnsPeriod);
+    Sleep(static_cast<DWORD>(hnsPeriod / 10000));
+    pAc->Stop();
+
+    state_ = PlaybackState::Stopped;
 }
 
 void Player::HandleDeviceLost() {

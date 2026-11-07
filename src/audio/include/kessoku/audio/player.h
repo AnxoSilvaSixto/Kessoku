@@ -118,8 +118,17 @@ private:
     void RenderThreadEntry();
 
     // Fill one buffer from the WAV file and push it to the audio device.
-    // Returns true if there is more data to play, false if end of file.
+    // Returns true if there is more data to play, false at end of file or on
+    // a terminal buffer error. A false return latches Stopped or DeviceLost
+    // while still holding renderMutex_, so a concurrent Pause() cannot
+    // publish Paused after the last render pass (see FinishStreamLocked).
     bool RenderIteration();
+
+    // Latch the terminal state for a render-thread exit and let the last
+    // buffer play before stopping the client. Caller holds renderMutex_, so
+    // this cannot interleave with Pause() publishing Paused under the same
+    // lock. deviceGone selects DeviceLost instead of Stopped.
+    void FinishStreamLocked(bool deviceGone);
 
     // Handle device invalidation: transition to DeviceLost state.
     void HandleDeviceLost();

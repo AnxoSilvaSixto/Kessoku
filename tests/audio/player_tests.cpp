@@ -940,6 +940,118 @@ void RunFlacSeekToEndTest() {
     CleanupTempFlac(flacPath);
 }
 
+// Test 31: Pause() racing natural end-of-stream must not leave a dead
+// paused render thread. Regression: RenderIteration() released renderMutex_
+// before the render thread latched Stopped. A Pause() blocked on that mutex
+// during the final render pass could publish Paused after the last buffer
+// was written; the render thread then observed Paused, skipped its exit
+// transition, and ended. Resume() flipped the state back to Playing, but no
+// thread existed to fill the buffer again. This is a one-sided guard:
+// hitting the interleaving depends on scheduling, but a reported failure is
+// always a real dead render thread.
+void RunPauseAtEndOfStreamTest() {
+    std::wstring wavPath = CreateTempWav(
+        L"\\kessoku_test_player31_", 44100, 16, 2, 4410); // 0.1 s
+    CHECK(!wavPath.empty(), "Create temp WAV for pause-at-EOS test");
+    if (wavPath.empty()) {
+        return;
+    }
+
+    bool skip = false;
+    for (int attempt = 0; attempt < 8 && !skip; ++attempt) {
+        auto result = kessoku::audio::Player::Create(wavPath);
+        if (result.IsErr()) {
+            if (IsEnvironmentSkipCode(result.GetError().code)) {
+                printf("SKIP: pause-at-EOS test "
+                       "(no compatible exclusive-mode audio device)\n");
+            } else {
+                CHECK(result.IsOk(), "Player::Create for pause-at-EOS test");
+            }
+            break;
+        }
+
+        auto player = std::move(result.Value());
+        if (!player.Play().IsOk()) {
+            CHECK(false, "Play() for pause-at-EOS test");
+            (void)player.Stop();
+            break;
+        }
+
+        const uint32_t total = player.GetTotalFrames();
+        bool paused = false;
+
+        // Pause once the last ~1024 frames remain. Pause() either wins
+        // (state Paused) or loses to end-of-stream (Err with the state
+        // already Stopped).
+        while (!skip) {
+            const auto state = player.GetState();
+            if (state == kessoku::audio::PlaybackState::Stopped) {
+                break;
+            }
+            if (state == kessoku::audio::PlaybackState::DeviceLost) {
+                printf("SKIP: pause-at-EOS test (device lost)\n");
+                skip = true;
+                break;
+            }
+            if (state != kessoku::audio::PlaybackState::Playing) {
+                CHECK(false, "Unexpected state before pause at EOS");
+                break;
+            }
+            if (total > 1024 && player.GetPosition() < total - 1024) {
+                Sleep(1);
+                continue;
+            }
+
+            auto pauseStatus = player.Pause();
+            if (pauseStatus.IsOk()) {
+                paused = true;
+                break;
+            }
+            if (player.GetState() == kessoku::audio::PlaybackState::Stopped) {
+                break;
+            }
+            if (player.GetState() ==
+                kessoku::audio::PlaybackState::DeviceLost) {
+                printf("SKIP: pause-at-EOS test (device lost)\n");
+                skip = true;
+                break;
+            }
+            CHECK(false, "Pause() near EOS fails unexpectedly");
+            break;
+        }
+
+        if (paused) {
+            CHECK(player.GetState() == kessoku::audio::PlaybackState::Paused,
+                  "State is Paused after pause near EOS");
+            CHECK(player.Resume().IsOk(), "Resume() after pause near EOS");
+
+            // At most ~1024 frames remain, so a live render thread reaches
+            // Stopped well inside this window. The dead render thread left
+            // by the old race stays Playing.
+            bool stopped = false;
+            for (int i = 0; i < 100; ++i) {
+                const auto state = player.GetState();
+                if (state == kessoku::audio::PlaybackState::Stopped) {
+                    stopped = true;
+                    break;
+                }
+                if (state == kessoku::audio::PlaybackState::DeviceLost) {
+                    printf("SKIP: pause-at-EOS test (device lost)\n");
+                    skip = true;
+                    break;
+                }
+                Sleep(20);
+            }
+            CHECK(stopped || skip,
+                  "Track reaches Stopped after Resume near EOS");
+        }
+
+        (void)player.Stop();
+    }
+
+    CleanupTempWav(wavPath);
+}
+
 } // namespace
 
 int main() {
@@ -2331,6 +2443,10 @@ int main() {
 
     // --- Test 30: seeking to the end of a FLAC succeeds ---
     RunFlacSeekToEndTest();
+
+    // --- Test 31: Pause() racing natural end-of-stream must not leave a
+    // --- dead paused render thread ---
+    RunPauseAtEndOfStreamTest();
 
     std::wprintf(L"\n=== Results: %d failures ===\n", gFailures);
     return gFailures;
