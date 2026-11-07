@@ -533,19 +533,23 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
     }
 
     HANDLE hEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-    if (hEvent == nullptr) {
+    HANDLE hWakeEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    if (hEvent == nullptr || hWakeEvent == nullptr) {
+        if (hEvent != nullptr) CloseHandle(hEvent);
+        if (hWakeEvent != nullptr) CloseHandle(hWakeEvent);
         pAudioClient->Release();
         pDevice->Release();
         pEnumerator->Release();
         uninitIfOwned();
         return core::Result<Player>::Err(
             core::ErrorCode::AudioInitFailed,
-            "Could not create event handle");
+            "Could not create event handles");
     }
 
     hr = pAudioClient->SetEventHandle(hEvent);
     if (FAILED(hr)) {
         CloseHandle(hEvent);
+        CloseHandle(hWakeEvent);
         pAudioClient->Release();
         pDevice->Release();
         pEnumerator->Release();
@@ -561,6 +565,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
         reinterpret_cast<void**>(&pRenderClient));
     if (FAILED(hr) || pRenderClient == nullptr) {
         CloseHandle(hEvent);
+        CloseHandle(hWakeEvent);
         pAudioClient->Release();
         pDevice->Release();
         pEnumerator->Release();
@@ -580,6 +585,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
     player.pAudioClient_ = pAudioClient;
     player.pRenderClient_ = pRenderClient;
     player.hEvent_ = hEvent;
+    player.hWakeEvent_ = hWakeEvent;
     player.bufferFrameCount_ = bufferFrameCount;
     player.bytesPerFrame_ = bytesPerFrame;
     player.dataChunkOffset_ = dataChunkOffset;
@@ -599,7 +605,7 @@ core::Status Player::Play() {
     // end-of-stream also ends in Stopped but keeps these resources, so the
     // state check below cannot tell the two cases apart.
     if (pAudioClient_ == nullptr || pRenderClient_ == nullptr ||
-        hEvent_ == nullptr) {
+        hEvent_ == nullptr || hWakeEvent_ == nullptr) {
         return core::Result<void>::Err(
             core::ErrorCode::AudioInitFailed,
             "Player resources released; create a new Player");
@@ -665,17 +671,22 @@ core::Status Player::Pause() {
             "Player not in Playing state");
     }
 
+    // Publish Paused and stop the client while no render pass can be in
+    // flight. Taking renderMutex_ before Stop() puts the pause boundary
+    // between iterations instead of in the middle of one, so no
+    // GetBuffer/ReleaseBuffer can straddle the stopped stream.
+    std::lock_guard<std::mutex> renderLock(renderMutex_);
+    state_ = PlaybackState::Paused;
+
     IAudioClient* pAc = reinterpret_cast<IAudioClient*>(pAudioClient_);
     pAc->Stop();
 
-    state_ = PlaybackState::Paused;
-
-    // IAudioClient::Stop() does not join our render thread. Wait out an
-    // iteration that was already in flight, so the position cannot advance
-    // after Pause() returns. RenderIteration re-checks the state under the
-    // same lock, so a thread that had only passed the loop's Playing check
-    // will bail instead of rendering after this point.
-    std::lock_guard<std::mutex> renderLock(renderMutex_);
+    // Wake a thread that was blocked in the Playing wait so it observes
+    // Paused promptly. This is the control event, never the audio engine's
+    // buffer event.
+    if (hWakeEvent_) {
+        SetEvent(reinterpret_cast<HANDLE>(hWakeEvent_));
+    }
 
     return core::Result<void>::Ok();
 }
@@ -700,11 +711,15 @@ core::Status Player::Resume() {
     }
 
     state_ = PlaybackState::Playing;
-    // Wake the render thread promptly: while Paused it polls hEvent_ with
-    // a short timeout, and Start() alone only signals on the next buffer
-    // period. Auto-reset event; harmless if the thread is not waiting.
-    if (hEvent_) {
-        SetEvent(reinterpret_cast<HANDLE>(hEvent_));
+
+    // Wake the render thread out of the Paused poll. Do NOT touch hEvent_:
+    // if the engine signaled a buffer while paused (including around
+    // Start()), that notification must stay pending so the next Playing
+    // wait consumes it and fills the buffer. Setting the engine event here
+    // instead could coalesce with that notification, leaving the stream
+    // with an empty buffer and no further event — the post-Resume stall.
+    if (hWakeEvent_) {
+        SetEvent(reinterpret_cast<HANDLE>(hWakeEvent_));
     }
     return core::Result<void>::Ok();
 }
@@ -808,16 +823,16 @@ core::Status Player::Stop() {
         // event), so without this it cannot tell "Stop() was called" from
         // "intentional pause" and the join would hang. Preserve DeviceLost:
         // a lost device already exited (or is exiting) the thread on its own.
-        // Signaling hEvent_ wakes a thread blocked in WaitForSingleObject
-        // promptly instead of waiting out the full 2s Playing timeout.
-        // Cleanup below (releases, CoUninitialize) is unchanged.
+        // Signaling the control event wakes a thread blocked in either wait
+        // promptly instead of waiting out the full timeout. Cleanup below
+        // (releases, CoUninitialize) is unchanged.
         const PlaybackState stopFrom = state_.load();
         if (stopFrom == PlaybackState::Playing ||
             stopFrom == PlaybackState::Paused) {
             state_.store(PlaybackState::Stopped);
         }
-        if (hEvent_) {
-            SetEvent(reinterpret_cast<HANDLE>(hEvent_));
+        if (hWakeEvent_) {
+            SetEvent(reinterpret_cast<HANDLE>(hWakeEvent_));
         }
 
         if (renderThread_.joinable()) {
@@ -850,6 +865,11 @@ core::Status Player::Stop() {
     if (pEnumerator_) {
         reinterpret_cast<IMMDeviceEnumerator*>(pEnumerator_)->Release();
         pEnumerator_ = nullptr;
+    }
+
+    if (hWakeEvent_) {
+        CloseHandle(hWakeEvent_);
+        hWakeEvent_ = nullptr;
     }
 
     if (hEvent_) {
@@ -935,6 +955,17 @@ void Player::RenderThreadEntry() {
         return;
     }
 
+    // hEvent_ is signaled by the audio engine when a buffer is ready (and
+    // on device invalidation). hWakeEvent_ is this Player's private control
+    // event for Pause()/Resume()/Stop(). They must stay separate: if the
+    // Paused poll waited on hEvent_, it could consume a buffer
+    // notification that arrives around Stop/Start, and an exclusive-mode
+    // event-driven stream left with no notification and an empty buffer
+    // never asks for data again (playback stalls after Resume()).
+    HANDLE waitHandles[2] = {
+        reinterpret_cast<HANDLE>(hEvent_),
+        reinterpret_cast<HANDLE>(hWakeEvent_)};
+
     while (true) {
         const PlaybackState loopState = state_.load();
         if (loopState == PlaybackState::Stopped ||
@@ -942,14 +973,12 @@ void Player::RenderThreadEntry() {
             break;
         }
         if (loopState == PlaybackState::Paused) {
-            // Intentional pause: Pause() stopped the client, so the buffer
-            // event will not re-signal until Resume() calls Start(). A lack
-            // of event here is expected, never device loss. Poll with a
-            // short timeout so Resume()/Stop() (both SetEvent hEvent_) are
-            // noticed promptly, and probe for unplug-while-paused so a
-            // genuine invalidation still lands in DeviceLost.
-            WaitForSingleObject(
-                reinterpret_cast<HANDLE>(hEvent_), 100);
+            // Intentional pause: the client is stopped, so hEvent_ may or
+            // may not have a notification pending. Do not consume it here;
+            // leaving it pending is what lets Resume() restart the stream
+            // without losing a buffer. Wait only on the control event, with
+            // a timeout so unplug-while-paused still lands in DeviceLost.
+            WaitForSingleObject(waitHandles[1], 100);
             UINT32 pad = 0;
             const HRESULT qhr = pAc->GetCurrentPadding(&pad);
             if (IsDeviceGone(qhr)) {
@@ -959,8 +988,13 @@ void Player::RenderThreadEntry() {
             continue;
         }
 
-        DWORD waitResult = WaitForSingleObject(
-            reinterpret_cast<HANDLE>(hEvent_), 2000);
+        DWORD waitResult = WaitForMultipleObjects(2, waitHandles, FALSE, 2000);
+
+        if (waitResult == WAIT_OBJECT_0 + 1) {
+            // Control wake (Pause/Resume/Stop): re-check the state at the
+            // top instead of touching the buffer.
+            continue;
+        }
 
         if (waitResult == WAIT_OBJECT_0) {
             // Pause()/Stop() may have raced with the signal; re-check
@@ -984,8 +1018,9 @@ void Player::RenderThreadEntry() {
         }
 
         // Timeout or wait failure: never assume loss. Pause() stops the
-        // client (no more events) and sets Paused; Stop() now stores
-        // Stopped and signals before joining. Re-check state first.
+        // client (no more events) and sets Paused; Stop() stores Stopped
+        // and signals the control event before joining. Re-check state
+        // first.
         const PlaybackState timeoutState = state_.load();
         if (timeoutState == PlaybackState::Paused) {
             continue;
@@ -1115,11 +1150,10 @@ uint32_t Player::ReadFrames(uint8_t* buffer, uint32_t maxFrames) {
 bool Player::RenderIteration() {
     std::lock_guard<std::mutex> renderLock(renderMutex_);
 
-    // Pause()/Seek() can race with the loop's state check. Re-check here,
-    // under the same lock Pause() takes after storing Paused, so an
-    // iteration that lost that race never advances the position. Returning
-    // true keeps the caller's loop alive; it observes Paused on its next
-    // top-of-loop check.
+    // Pause() holds this same lock across its state store and Stop(), so an
+    // iteration cannot start after Paused is published and cannot straddle
+    // the stopped stream. Returning true keeps the caller's loop alive; it
+    // observes Paused on its next top-of-loop check.
     if (state_.load() != PlaybackState::Playing) {
         return true;
     }

@@ -1882,6 +1882,18 @@ int main() {
                 CHECK(player.GetPosition() != 0 || pausedPos == 0,
                       "Resume did not restart from frame 0");
 
+                // Resuming must restart the buffer-event stream, not just
+                // flip the state: the render thread only advances the
+                // position when the audio engine signals its event, so a
+                // state-only Resume() would leave playback silent forever.
+                const uint32_t resumedPos = player.GetPosition();
+                Sleep(1000);
+                CHECK(player.GetPosition() > resumedPos,
+                      "Position advances after Resume()");
+                CHECK(player.GetState() ==
+                          kessoku::audio::PlaybackState::Playing,
+                      "State is still Playing 1s after Resume()");
+
                 (void)player.Stop();
             }
 

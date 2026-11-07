@@ -38,6 +38,7 @@ public:
           pAudioClient_(other.pAudioClient_),
           pRenderClient_(other.pRenderClient_),
           hEvent_(other.hEvent_),
+          hWakeEvent_(other.hWakeEvent_),
           renderThread_(std::move(other.renderThread_)),
           wavPath_(std::move(other.wavPath_)),
           hFile_(other.hFile_),
@@ -60,6 +61,7 @@ public:
         other.pAudioClient_ = nullptr;
         other.pRenderClient_ = nullptr;
         other.hEvent_ = nullptr;
+        other.hWakeEvent_ = nullptr;
         other.hFile_ = nullptr;
         other.currentFrame_ = 0;
         other.ownsCom_ = false;
@@ -137,8 +139,20 @@ private:
     void* pAudioClient_ = nullptr;
     void* pRenderClient_ = nullptr;
 
-    // Event handle for event-driven buffering
+    // Event handle for event-driven buffering. Owned by the audio engine:
+    // it signals when a buffer is ready, and device invalidation also
+    // signals it (documented by Microsoft Learn "Recovering from an
+    // Invalid-Device Error"). Never wait on it while Paused; see below.
     void* hEvent_ = nullptr;
+
+    // Auto-reset control event, private to this Player. Pause()/Resume()/
+    // Stop() signal it to wake the render thread promptly. Kept separate
+    // from hEvent_ so a Paused poll cannot consume (and therefore lose) an
+    // audio-engine buffer notification that arrives around Stop/Start.
+    // Consuming that notification without filling the buffer can leave an
+    // exclusive-mode event-driven stream with an empty buffer and no
+    // further event, which stalls playback after Resume().
+    void* hWakeEvent_ = nullptr;
 
     // Render thread
     std::thread renderThread_;
