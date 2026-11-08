@@ -831,8 +831,13 @@ void RunPrematureFlacEndTest() {
 // flagging an error, so more stayed true and the render loop waited forever
 // for samples that no longer exist.
 bool TruncateFile(std::wstring_view path, uint64_t newSize) {
-    HANDLE hFile = CreateFileW(path.data(), GENERIC_WRITE, 0, nullptr,
-                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    // Share read/write/delete so a file already open by the player or the
+    // FLAC decoder can be truncated underneath it (Test 34 relies on this).
+    HANDLE hFile = CreateFileW(path.data(), GENERIC_WRITE,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE |
+                                   FILE_SHARE_DELETE,
+                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                               nullptr);
     if (hFile == INVALID_HANDLE_VALUE) {
         return false;
     }
@@ -1175,6 +1180,54 @@ void RunFlacReaderOpenSeekFailureTest() {
           "FlacReader::Open reports an unreachable start sample");
     CHECK(!failingReader.IsOpen(),
           "Failed start-position open leaves the reader closed");
+
+    CleanupTempFlac(flacPath);
+}
+
+// Test 34: when a failed FLAC seek cannot restore the previous frame either,
+// the player must end the stream rather than leave a Paused player that
+// would resume at an unknown position. Truncating the file down to metadata
+// after Pause() makes both the requested sample and the previous sample
+// unreachable, forcing the terminal branch of the seek-failure recovery.
+void RunFlacSeekRestoreFailureTest() {
+    std::wstring flacPath = CreateTempFlac(
+        L"\\kessoku_test_player34_", 44100, 16, 2, 441000);
+    CHECK(!flacPath.empty(), "Create temp FLAC for seek-restore test");
+    if (flacPath.empty()) {
+        return;
+    }
+
+    auto result = kessoku::audio::Player::Create(flacPath);
+    if (result.IsErr() && IsEnvironmentSkipCode(result.GetError().code)) {
+        printf("SKIP: FLAC seek-restore test "
+               "(no compatible exclusive-mode audio device)\n");
+    } else {
+        CHECK(result.IsOk(), "Player::Create for FLAC seek-restore test");
+    }
+
+    if (result.IsOk()) {
+        auto& player = result.Value();
+        CHECK(player.Play().IsOk(), "Play() for FLAC seek-restore test");
+        Sleep(50);
+        CHECK(player.Pause().IsOk(), "Pause() before seek-restore test");
+        const uint32_t posBefore = player.GetPosition();
+        CHECK(posBefore < 400000, "Position is before the requested seek");
+
+        // FLAC metadata starts with 'fLaC' + a 4-byte block header + the
+        // 34-byte STREAMINFO payload. Dropping every audio frame afterwards
+        // leaves both the requested sample and posBefore unreachable.
+        CHECK(TruncateFile(flacPath, 42),
+              "Truncate FLAC down to its metadata");
+
+        auto seekStatus = player.Seek(400000);
+        CHECK(seekStatus.IsErr(), "Seek fails with no audio left");
+        CHECK(player.GetPosition() == posBefore,
+              "Position stays unchanged when restore also fails");
+        CHECK(player.GetState() == kessoku::audio::PlaybackState::Stopped,
+              "Unrestorable seek ends the stream instead of Pausing");
+
+        (void)player.Stop();
+    }
 
     CleanupTempFlac(flacPath);
 }
@@ -2580,6 +2633,9 @@ int main() {
 
     // --- Test 33: FlacReader::Open reports a failed start-position seek ---
     RunFlacReaderOpenSeekFailureTest();
+
+    // --- Test 34: an unrestorable failed seek ends the stream ---
+    RunFlacSeekRestoreFailureTest();
 
     std::wprintf(L"\n=== Results: %d failures ===\n", gFailures);
     return gFailures;
