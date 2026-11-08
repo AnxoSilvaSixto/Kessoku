@@ -763,7 +763,6 @@ core::Status Player::Seek(uint32_t frameOffset) {
         }
         {
             std::lock_guard<std::mutex> lock(positionMutex_);
-            currentFrame_ = frameOffset;
             // libFLAC rejects seek_absolute(sample >= total_samples), but
             // totalFrames_ is a legitimate end position here: the seek bar's
             // maximum maps to it, and no frame is decoded there. The next
@@ -772,12 +771,31 @@ core::Status Player::Seek(uint32_t frameOffset) {
             // error. A later backwards seek repositions the decoder and
             // clears its buffer anyway.
             if (frameOffset < totalFrames_ && !flacReader_.Seek(frameOffset)) {
-                // Decoder was flushed back to a usable state; the stream
-                // stays paused so the caller can Resume() or Stop().
+                // A failed seek leaves libFLAC flushed at an indeterminate
+                // file position. Publishing frameOffset here would make
+                // GetPosition() disagree with the audio decoded after a
+                // later Resume(), so restore the last known-good frame
+                // instead. FlacReader::Seek flushes on failure, which puts
+                // the decoder back in a state seek_absolute accepts.
+                if (!flacReader_.Seek(currentFrame_)) {
+                    // Neither the target nor the previous frame is
+                    // reachable: the decoder is unusable. End the stream
+                    // rather than leave a Paused player that would resume
+                    // at an unknown position. Pause() already stopped the
+                    // client, and the render thread exits its poll on the
+                    // next state check; Stop() then joins it.
+                    state_ = PlaybackState::Stopped;
+                    return core::Result<void>::Err(
+                        core::ErrorCode::AudioInitFailed,
+                        "FLAC seek failed; stream stopped");
+                }
+                // Decoder is back at the unchanged currentFrame_; the
+                // stream stays paused so the caller can Resume() or Stop().
                 return core::Result<void>::Err(
                     core::ErrorCode::AudioInitFailed,
                     "FLAC seek failed");
             }
+            currentFrame_ = frameOffset;
         }
         if (!wasPaused) {
             auto resumeStatus = Resume();

@@ -1052,6 +1052,91 @@ void RunPauseAtEndOfStreamTest() {
     CleanupTempWav(wavPath);
 }
 
+// Test 32: a failed FLAC seek must not move the reported position. libFLAC
+// flushes the decoder to an indeterminate file position when seek_absolute()
+// fails, so publishing the requested target in currentFrame_ would make
+// GetPosition() disagree with the audio a later Resume() decodes (or with
+// the clean end-of-stream the flushed decoder hits). The player must restore
+// the last known-good frame instead and report failure with the position
+// unchanged.
+void RunFlacSeekFailureTest() {
+    std::wstring flacPath = CreateTempFlac(
+        L"\\kessoku_test_player32_", 44100, 16, 2, 441000);
+    CHECK(!flacPath.empty(), "Create temp FLAC for seek-failure test");
+    if (flacPath.empty()) {
+        return;
+    }
+
+    // Keep STREAMINFO (still declaring 441000 samples) and roughly half the
+    // audio. Seeking to sample 400000 then has no frame to land on inside
+    // the surviving data and fails deterministically.
+    uint64_t fileSize = 0;
+    {
+        HANDLE hFile = CreateFileW(flacPath.c_str(), GENERIC_READ,
+                                   FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                   FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            LARGE_INTEGER size;
+            if (GetFileSizeEx(hFile, &size)) {
+                fileSize = static_cast<uint64_t>(size.QuadPart);
+            }
+            CloseHandle(hFile);
+        }
+    }
+    CHECK(fileSize > 1024, "FLAC file is large enough to truncate");
+    if (fileSize > 1024) {
+        CHECK(TruncateFile(flacPath, fileSize / 2),
+              "Truncate FLAC after its STREAMINFO block");
+    }
+
+    auto result = kessoku::audio::Player::Create(flacPath);
+    if (result.IsErr() && IsEnvironmentSkipCode(result.GetError().code)) {
+        printf("SKIP: FLAC seek-failure test "
+               "(no compatible exclusive-mode audio device)\n");
+    } else {
+        CHECK(result.IsOk(), "Player::Create for FLAC seek-failure test");
+    }
+
+    if (result.IsOk()) {
+        auto& player = result.Value();
+        CHECK(player.Play().IsOk(), "Play() for FLAC seek-failure test");
+        Sleep(50);
+        CHECK(player.Pause().IsOk(), "Pause() before failed FLAC seek");
+
+        const uint32_t total = player.GetTotalFrames();
+        const uint32_t posBefore = player.GetPosition();
+        CHECK(total == 441000, "STREAMINFO total survives truncation");
+        CHECK(posBefore < 400000, "Playback position is before the cut");
+
+        auto seekStatus = player.Seek(400000);
+        CHECK(seekStatus.IsErr(), "Seek past the truncated audio fails");
+        CHECK(player.GetPosition() == posBefore,
+              "Failed seek leaves the reported position unchanged");
+        CHECK(player.GetState() == kessoku::audio::PlaybackState::Paused,
+              "Player stays Paused after a failed seek");
+
+        // Restoring the reported number is not enough: the decoder itself
+        // must be back at posBefore, so playback has to advance from there.
+        CHECK(player.Resume().IsOk(), "Resume() after failed FLAC seek");
+        bool advanced = false;
+        for (int i = 0; i < 80; ++i) {
+            if (player.GetState() != kessoku::audio::PlaybackState::Playing) {
+                break;
+            }
+            if (player.GetPosition() > posBefore) {
+                advanced = true;
+                break;
+            }
+            Sleep(25);
+        }
+        CHECK(advanced, "Playback advances from the restored position");
+
+        (void)player.Stop();
+    }
+
+    CleanupTempFlac(flacPath);
+}
+
 } // namespace
 
 int main() {
@@ -2447,6 +2532,9 @@ int main() {
     // --- Test 31: Pause() racing natural end-of-stream must not leave a
     // --- dead paused render thread ---
     RunPauseAtEndOfStreamTest();
+
+    // --- Test 32: a failed FLAC seek must leave the position unchanged ---
+    RunFlacSeekFailureTest();
 
     std::wprintf(L"\n=== Results: %d failures ===\n", gFailures);
     return gFailures;
