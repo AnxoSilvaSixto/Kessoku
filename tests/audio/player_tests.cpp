@@ -844,6 +844,27 @@ bool TruncateFile(std::wstring_view path, uint64_t newSize) {
     return ok;
 }
 
+// Truncate a file to half its current size, keeping its leading bytes
+// (for FLAC: STREAMINFO plus part of the audio). Returns false when the
+// file is too small to make the split meaningful or cannot be truncated.
+bool TruncateFileToHalf(std::wstring_view path) {
+    uint64_t size = 0;
+    HANDLE hFile = CreateFileW(path.data(), GENERIC_READ, FILE_SHARE_READ,
+                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                               nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    LARGE_INTEGER fileSize;
+    const bool sized = GetFileSizeEx(hFile, &fileSize) != 0;
+    CloseHandle(hFile);
+    if (!sized) {
+        return false;
+    }
+    size = static_cast<uint64_t>(fileSize.QuadPart);
+    return size > 1024 && TruncateFile(path, size / 2);
+}
+
 void RunWavTruncatedAfterCreateTest() {
     std::wstring wavPath = CreateTempWav(
         L"\\kessoku_test_player29_", 44100, 16, 2, 44100);
@@ -1070,24 +1091,8 @@ void RunFlacSeekFailureTest() {
     // Keep STREAMINFO (still declaring 441000 samples) and roughly half the
     // audio. Seeking to sample 400000 then has no frame to land on inside
     // the surviving data and fails deterministically.
-    uint64_t fileSize = 0;
-    {
-        HANDLE hFile = CreateFileW(flacPath.c_str(), GENERIC_READ,
-                                   FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                                   FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (hFile != INVALID_HANDLE_VALUE) {
-            LARGE_INTEGER size;
-            if (GetFileSizeEx(hFile, &size)) {
-                fileSize = static_cast<uint64_t>(size.QuadPart);
-            }
-            CloseHandle(hFile);
-        }
-    }
-    CHECK(fileSize > 1024, "FLAC file is large enough to truncate");
-    if (fileSize > 1024) {
-        CHECK(TruncateFile(flacPath, fileSize / 2),
-              "Truncate FLAC after its STREAMINFO block");
-    }
+    CHECK(TruncateFileToHalf(flacPath),
+          "Truncate FLAC after its STREAMINFO block");
 
     auto result = kessoku::audio::Player::Create(flacPath);
     if (result.IsErr() && IsEnvironmentSkipCode(result.GetError().code)) {
@@ -1133,6 +1138,43 @@ void RunFlacSeekFailureTest() {
 
         (void)player.Stop();
     }
+
+    CleanupTempFlac(flacPath);
+}
+
+// Test 33: FlacReader::Open must report a failed start-position seek. Its
+// documented contract is "position at startSample ... returns an error
+// message on failure", but a failed seek_absolute() only flushed the decoder
+// and then returned success. A caller would read audio from an unspecified
+// point while believing playback starts at startSample. Device-free: this
+// exercises the decoder contract directly.
+void RunFlacReaderOpenSeekFailureTest() {
+    std::wstring flacPath = CreateTempFlac(
+        L"\\kessoku_test_player33_", 44100, 16, 2, 441000);
+    CHECK(!flacPath.empty(), "Create temp FLAC for reader-open seek test");
+    if (flacPath.empty()) {
+        return;
+    }
+
+    CHECK(TruncateFileToHalf(flacPath),
+          "Truncate FLAC for reader-open seek test");
+
+    kessoku::audio::FlacFormat fmt{};
+    CHECK(kessoku::audio::ParseFlacFormat(flacPath, fmt).empty(),
+          "STREAMINFO still parses after truncation");
+
+    kessoku::audio::FlacReader reader;
+    CHECK(reader.Open(flacPath, fmt, 0).empty(),
+          "FlacReader::Open at stream start succeeds");
+    CHECK(reader.IsOpen(), "FlacReader is open after a start-position open");
+    reader.Close();
+
+    kessoku::audio::FlacReader failingReader;
+    const std::string err = failingReader.Open(flacPath, fmt, 400000);
+    CHECK(!err.empty(),
+          "FlacReader::Open reports an unreachable start sample");
+    CHECK(!failingReader.IsOpen(),
+          "Failed start-position open leaves the reader closed");
 
     CleanupTempFlac(flacPath);
 }
@@ -2535,6 +2577,9 @@ int main() {
 
     // --- Test 32: a failed FLAC seek must leave the position unchanged ---
     RunFlacSeekFailureTest();
+
+    // --- Test 33: FlacReader::Open reports a failed start-position seek ---
+    RunFlacReaderOpenSeekFailureTest();
 
     std::wprintf(L"\n=== Results: %d failures ===\n", gFailures);
     return gFailures;

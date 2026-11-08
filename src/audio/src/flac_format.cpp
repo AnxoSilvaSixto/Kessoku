@@ -212,7 +212,14 @@ std::string FlacReader::Open(const std::wstring& path, const FlacFormat& fmt,
 
     if (startSample > 0 &&
         FLAC__stream_decoder_seek_absolute(decoder, startSample) == 0) {
+        // Do not report success with the decoder desynchronized: a caller
+        // that asked to start at startSample must not read audio from an
+        // unspecified point. Flush first (libFLAC leaves SEEK_ERROR behind,
+        // which finish() tolerates but flushing restores the normal state),
+        // then close so IsOpen() reports the failure unambiguously.
         FLAC__stream_decoder_flush(decoder);
+        CloseLocked();
+        return "Could not seek to the requested FLAC start position";
     }
     return {};
 }
