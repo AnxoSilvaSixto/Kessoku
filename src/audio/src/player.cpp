@@ -1046,6 +1046,16 @@ void Player::RenderThreadEntry() {
             // past and a stop is never mistaken for data.
             const PlaybackState signaledState = state_.load();
             if (signaledState == PlaybackState::Paused) {
+                // Pause() won the race after this auto-reset buffer event
+                // was consumed. The notification is one-shot: the engine
+                // will not signal again for this buffer, and a later
+                // Resume() would start the client and then wait for a
+                // buffer event that was already consumed here, leaving the
+                // stream Playing with no render pass ever running again.
+                // Put the notification back so the next Playing wait
+                // services it. The paused poll never waits on hEvent_, so
+                // it stays pending across the pause.
+                SetEvent(reinterpret_cast<HANDLE>(hEvent_));
                 continue;
             }
             if (signaledState == PlaybackState::Stopped ||
