@@ -28,16 +28,49 @@ target_compile_definitions(kessoku_build_options INTERFACE
 )
 
 # Release-class configurations are the ones the player runs in normal use.
-# Pin MSVC's maximum-speed profile at the target level instead of relying on
-# the generator's current defaults: /O2 optimizes for speed and /Ob2 enables
-# aggressive inlining. Debug and ASan keep their /Od flags for debugging and
-# sanitizer accuracy.
-target_compile_options(kessoku_build_options INTERFACE
-    "$<$<CONFIG:Release>:/O2>"
-    "$<$<CONFIG:Release>:/Ob2>"
-    "$<$<CONFIG:RelWithDebInfo>:/O2>"
-    "$<$<CONFIG:RelWithDebInfo>:/Ob2>"
-)
+# This build is tuned for this machine's CPU (AMD Ryzen 7 5700X, Zen 3).
+# AVX2 is the highest ISA level that CPU supports, and /arch:AVX2 also lets
+# MSVC use FMA and BMI. The rest is MSVC's maximum-speed profile:
+#   /O2 /Oi /Ot /Oy /GF /Gy  - speed, intrinsics, fast code, no frame pointer,
+#                              string pooling, function-level linking
+#   /Ob3                      - more aggressive inlining than /Ob2
+#   /Gw /Zc:inline            - let the linker drop unreferenced data/COMDATs
+#   /fp:fast                  - safe here: PCM is integer, and the only FP work
+#                              is the WASAPI buffer-duration calculation
+# Debug and ASan keep their /Od flags for debugging and sanitizer accuracy.
+#
+# CMake's MSVC defaults already contain /Ob2 (Release) and /Ob1
+# (RelWithDebInfo). Remove those weaker switches so /Ob3 below is the only
+# inlining setting; otherwise every compile emits D9025 "invalidating /Ob2".
+string(REPLACE "/Ob2" "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
+string(REPLACE "/Ob1" "" CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
+
+foreach(_config IN ITEMS Release RelWithDebInfo)
+    target_compile_options(kessoku_build_options INTERFACE
+        "$<$<CONFIG:${_config}>:/O2>"
+        "$<$<CONFIG:${_config}>:/Ob3>"
+        "$<$<CONFIG:${_config}>:/Oi>"
+        "$<$<CONFIG:${_config}>:/Ot>"
+        "$<$<CONFIG:${_config}>:/Oy>"
+        "$<$<CONFIG:${_config}>:/GF>"
+        "$<$<CONFIG:${_config}>:/Gy>"
+        "$<$<CONFIG:${_config}>:/Gw>"
+        "$<$<CONFIG:${_config}>:/Zc:inline>"
+        "$<$<CONFIG:${_config}>:/arch:AVX2>"
+        "$<$<CONFIG:${_config}>:/fp:fast>"
+    )
+    # Keep the release link step aggressive and non-incremental. /LTCG is
+    # supplied by CMAKE_INTERPROCEDURAL_OPTIMIZATION below; these pin the
+    # linker passes that remove unreferenced code and fold identical COMDATs.
+    # The explicit /LTCG overrides MSBuild's default /LTCG:incremental, which
+    # trades whole-program reoptimization for link speed.
+    target_link_options(kessoku_build_options INTERFACE
+        "$<$<CONFIG:${_config}>:/INCREMENTAL:NO>"
+        "$<$<CONFIG:${_config}>:/OPT:REF>"
+        "$<$<CONFIG:${_config}>:/OPT:ICF>"
+        "$<$<CONFIG:${_config}>:/LTCG>"
+    )
+endforeach()
 
 # Whole-program optimization (MSVC /GL + /LTCG) for release-class builds.
 # This lets the compiler inline and specialize across the core, audio,

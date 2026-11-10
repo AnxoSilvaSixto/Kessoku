@@ -27,6 +27,12 @@ ctest --preset default
 The executable lands in `build\Debug\Kessoku.exe`. Run it from
 `build\Debug` so the vcpkg-deployed DLLs resolve.
 
+Release and RelWithDebInfo builds are tuned for this machine's Zen 3 CPU:
+MSVC uses `/arch:AVX2` (which also enables FMA and BMI), `/Ob3`, `/Gw`, and
+`/Zc:inline`, with `/GL` + `/LTCG` whole-program optimization and a
+non-incremental linker. The resulting binaries require an AVX2-capable CPU;
+they are not portable to older x64 hardware.
+
 `player_tests` opens the default output device in WASAPI Exclusive Mode. Run
 one audio test suite at a time: two `ctest` invocations in parallel (for
 example, Debug and Release) contend for the same endpoint and one will fail.
@@ -35,10 +41,16 @@ example, Debug and Release) contend for the same endpoint and one will fail.
 
 | Preset | Purpose |
 |---|---|
-| `default` | Visual Studio 2026, Debug, x64-windows |
+| `default` | Visual Studio 2026, Debug, native x64-windows dependencies |
 | `release` | Build/test the Release configuration of the default preset |
 | `asan` | Debug build with MSVC AddressSanitizer |
 | `compile-commands` | Ninja build that emits `build/ninja/compile_commands.json` |
+
+The `default` and `compile-commands` presets use the project-local
+`triplets\x64-windows-native.cmake` vcpkg triplet, which builds Release
+dependencies with the same AVX2 and maximum-speed profile as the app. That
+triplet is specific to this machine's CPU; a different CPU needs its own
+triplet (or the stock `x64-windows` one).
 
 `scripts\setup-ninja-env.bat` initializes the MSVC environment, configures the
 Ninja preset, builds it, and leaves `compile_commands.json` ready for clangd.

@@ -8,12 +8,13 @@
     "configurePresets": [
         {
             "name": "default",
-            "displayName": "Visual Studio 18 2026 + vcpkg x64-windows",
+            "displayName": "Visual Studio 18 2026 + vcpkg x64-windows-native",
             "generator": "Visual Studio 18 2026",
             "binaryDir": "${sourceDir}/build",
             "cacheVariables": {
                 "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
-                "VCPKG_TARGET_TRIPLET": "x64-windows"
+                "VCPKG_TARGET_TRIPLET": "x64-windows-native",
+                "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/triplets"
             }
         },
         {
@@ -23,7 +24,8 @@
             "binaryDir": "${sourceDir}/build/ninja",
             "cacheVariables": {
                 "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
-                "VCPKG_TARGET_TRIPLET": "x64-windows",
+                "VCPKG_TARGET_TRIPLET": "x64-windows-native",
+                "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/triplets",
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "CMAKE_BUILD_TYPE": "Debug"
             }
