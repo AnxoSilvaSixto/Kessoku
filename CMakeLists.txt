@@ -27,6 +27,31 @@ target_compile_definitions(kessoku_build_options INTERFACE
     UNICODE
 )
 
+# Release-class configurations are the ones the player runs in normal use.
+# Pin MSVC's maximum-speed profile at the target level instead of relying on
+# the generator's current defaults: /O2 optimizes for speed and /Ob2 enables
+# aggressive inlining. Debug and ASan keep their /Od flags for debugging and
+# sanitizer accuracy.
+target_compile_options(kessoku_build_options INTERFACE
+    "$<$<CONFIG:Release>:/O2>"
+    "$<$<CONFIG:Release>:/Ob2>"
+    "$<$<CONFIG:RelWithDebInfo>:/O2>"
+    "$<$<CONFIG:RelWithDebInfo>:/Ob2>"
+)
+
+# Whole-program optimization (MSVC /GL + /LTCG) for release-class builds.
+# This lets the compiler inline and specialize across the core, audio,
+# library, and app translation units, which /O2 cannot do on its own. The
+# check keeps configuration working if a future toolchain drops IPO support.
+include(CheckIPOSupported)
+check_ipo_supported(RESULT kessoku_ipo_supported LANGUAGES CXX)
+if(kessoku_ipo_supported)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
+else()
+    message(WARNING "IPO is unavailable; release builds will use /O2 only")
+endif()
+
 # Option to mark when building under the asan preset.
 option(KESSOKU_ENABLE_ASAN "Building under the asan preset" OFF)
 
