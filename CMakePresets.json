@@ -40,6 +40,24 @@
                 "CMAKE_EXE_LINKER_FLAGS_DEBUG": "/INCREMENTAL:NO /DEBUG",
                 "KESSOKU_ENABLE_ASAN": "ON"
             }
+        },
+        {
+            "name": "pgo-generate",
+            "displayName": "PGO training build (/GENPROFILE, release)",
+            "inherits": ["default"],
+            "binaryDir": "${sourceDir}/build-pgo",
+            "cacheVariables": {
+                "KESSOKU_PGO": "GENERATE",
+                "KESSOKU_PGO_DIR": "${sourceDir}/build-pgo/pgo"
+            }
+        },
+        {
+            "name": "pgo-use",
+            "displayName": "PGO optimized build (/USEPROFILE, release)",
+            "inherits": ["pgo-generate"],
+            "cacheVariables": {
+                "KESSOKU_PGO": "USE"
+            }
         }
     ],
     "buildPresets": [
@@ -69,6 +87,20 @@
             "displayName": "Build (ASan Debug)",
             "configurePreset": "asan",
             "configuration": "Debug",
+            "jobs": 1
+        },
+        {
+            "name": "pgo-generate",
+            "displayName": "Build PGO training app (Release /GENPROFILE)",
+            "configurePreset": "pgo-generate",
+            "configuration": "Release",
+            "jobs": 1
+        },
+        {
+            "name": "pgo-use",
+            "displayName": "Build PGO optimized app (Release /USEPROFILE)",
+            "configurePreset": "pgo-use",
+            "configuration": "Release",
             "jobs": 1
         }
     ],
@@ -114,6 +146,30 @@
             "displayName": "Test (ASan Debug)",
             "configurePreset": "asan",
             "configuration": "Debug",
+            "output": {
+                "outputOnFailure": true
+            },
+            "execution": {
+                "timeout": 120
+            }
+        },
+        {
+            "name": "pgo-generate",
+            "displayName": "Test (PGO training Release)",
+            "configurePreset": "pgo-generate",
+            "configuration": "Release",
+            "output": {
+                "outputOnFailure": true
+            },
+            "execution": {
+                "timeout": 120
+            }
+        },
+        {
+            "name": "pgo-use",
+            "displayName": "Test (PGO optimized Release)",
+            "configurePreset": "pgo-use",
+            "configuration": "Release",
             "output": {
                 "outputOnFailure": true
             },

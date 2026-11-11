@@ -88,6 +88,15 @@ endif()
 # Option to mark when building under the asan preset.
 option(KESSOKU_ENABLE_ASAN "Building under the asan preset" OFF)
 
+# Opt-in profile-guided optimization. OFF keeps the normal build untouched.
+# GENERATE links the app with /LTCG /GENPROFILE to produce an instrumented
+# binary and a profile database; USE links it with /LTCG /USEPROFILE to
+# consume the trained database. Only the app is instrumented: the tests are
+# training drivers, not PGO targets, and the vcpkg DLLs are not re-instrumented.
+set(KESSOKU_PGO "OFF" CACHE STRING "PGO mode: OFF, GENERATE, or USE")
+set_property(CACHE KESSOKU_PGO PROPERTY STRINGS OFF GENERATE USE)
+set(KESSOKU_PGO_DIR "${CMAKE_BINARY_DIR}/pgo" CACHE PATH "Directory for the PGO profile database")
+
 # Copy the ASan runtime DLL next to a target's output when KESSOKU_ENABLE_ASAN
 # is ON. Call this for every test executable registered with CTest.
 function(kessoku_copy_asan_runtime target)
@@ -135,5 +144,46 @@ target_link_libraries(Kessoku PRIVATE
     FLAC::FLAC
     TagLib::TagLib
 )
+
+# Wire the opt-in PGO modes into the app's Release link only. Tests and the
+# vcpkg DLLs stay out of it: the profile must describe Kessoku.exe itself,
+# and pgomgr rejects .pgc files from a different link than the .pgd.
+if(NOT KESSOKU_PGO STREQUAL "OFF")
+    string(TOUPPER "${KESSOKU_PGO}" _kessoku_pgo_mode)
+    if(NOT _kessoku_pgo_mode MATCHES "^(GENERATE|USE)$")
+        message(FATAL_ERROR
+            "KESSOKU_PGO must be OFF, GENERATE, or USE (got '${KESSOKU_PGO}')")
+    endif()
+    file(MAKE_DIRECTORY "${KESSOKU_PGO_DIR}")
+    set(_kessoku_pgo_database "${KESSOKU_PGO_DIR}/Kessoku.pgd")
+    if(_kessoku_pgo_mode STREQUAL "GENERATE")
+        target_link_options(Kessoku PRIVATE
+            "$<$<CONFIG:Release>:/GENPROFILE:PGD=${_kessoku_pgo_database}>")
+        # The instrumented image imports pgort140.dll from the MSVC toolchain.
+        # Deploy it next to the training binary; otherwise Windows stops in a
+        # loader error dialog before the app can create its window.
+        get_filename_component(_kessoku_linker_dir "${CMAKE_LINKER}" DIRECTORY)
+        set(_kessoku_pgort_dll "${_kessoku_linker_dir}/pgort140.dll")
+        if(EXISTS "${_kessoku_pgort_dll}")
+            add_custom_command(TARGET Kessoku POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${_kessoku_pgort_dll}" "$<TARGET_FILE_DIR:Kessoku>"
+                COMMENT "Copying pgort140.dll for PGO training"
+                VERBATIM)
+        else()
+            message(WARNING
+                "pgort140.dll not found at ${_kessoku_pgort_dll}; "
+                "the instrumented app will not start until it is deployed")
+        endif()
+    else()
+        if(NOT EXISTS "${_kessoku_pgo_database}")
+            message(FATAL_ERROR
+                "KESSOKU_PGO=USE needs ${_kessoku_pgo_database}. "
+                "Build and train the pgo-generate preset first.")
+        endif()
+        target_link_options(Kessoku PRIVATE
+            "$<$<CONFIG:Release>:/USEPROFILE:PGD=${_kessoku_pgo_database}>")
+    endif()
+endif()
 
 add_subdirectory(tests)

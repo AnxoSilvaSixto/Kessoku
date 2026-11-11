@@ -1,6 +1,7 @@
 # Build output
 build/
 build-asan/
+build-pgo/
 out/
 
 # vcpkg build artifacts -- regenerated from vcpkg.json via `vcpkg install`
