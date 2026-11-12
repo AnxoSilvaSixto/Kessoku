@@ -37,6 +37,15 @@ void Check(bool condition, const char* desc) {
     }
 }
 
+void Check(bool condition, const wchar_t* desc) {
+    if (!condition) {
+        ++gFailures;
+        fwprintf(stderr, L"FAIL: %ls\n", desc);
+    } else {
+        wprintf(L"PASS: %ls\n", desc);
+    }
+}
+
 } // namespace
 
 #define CHECK(cond, desc) Check((cond), (desc))
@@ -223,6 +232,60 @@ bool StampWavInfoTag(std::wstring_view path,
     if (!album.empty())   tag->setAlbum(WstrToTagLibString(album));
     if (trackNum > 0)     tag->setTrack(trackNum);
 
+    return f.save();
+}
+
+bool StampWavTrackText(std::wstring_view path, std::wstring_view trackText) {
+    // NOLINTNEXTLINE(performance-string-view-conversions): see StampFlacTags.
+    TagLib::RIFF::WAV::File f(std::wstring(path).c_str(), true);
+    if (!f.isValid()) return false;
+
+    TagLib::PropertyMap props;
+    props.insert("TRACKNUMBER", WstrToTagLibString(trackText));
+    TagLib::PropertyMap rejected = f.setProperties(props);
+    if (!rejected.isEmpty()) return false;
+    return f.save();
+}
+
+bool StampFlacTrackText(std::wstring_view path, std::wstring_view trackText) {
+    // NOLINTNEXTLINE(performance-string-view-conversions): see StampFlacTags.
+    TagLib::FLAC::File f(std::wstring(path).c_str(), false);
+    if (!f.isValid()) return false;
+
+    TagLib::PropertyMap props;
+    props.insert("TRACKNUMBER", WstrToTagLibString(trackText));
+    TagLib::PropertyMap rejected = f.setProperties(props);
+    if (!rejected.isEmpty()) return false;
+    return f.save();
+}
+
+bool StampFlacTextTags(std::wstring_view path, std::wstring_view title,
+                       std::wstring_view artist, std::wstring_view album) {
+    // NOLINTNEXTLINE(performance-string-view-conversions): see StampFlacTags.
+    TagLib::FLAC::File f(std::wstring(path).c_str(), false);
+    if (!f.isValid()) return false;
+
+    TagLib::PropertyMap props;
+    props.insert("TITLE", WstrToTagLibString(title));
+    props.insert("ARTIST", WstrToTagLibString(artist));
+    props.insert("ALBUM", WstrToTagLibString(album));
+    TagLib::PropertyMap rejected = f.setProperties(props);
+    if (!rejected.isEmpty()) return false;
+    return f.save();
+}
+
+bool StampWavTextTags(std::wstring_view path, std::wstring_view title,
+                      std::wstring_view artist, std::wstring_view album) {
+    // NOLINTNEXTLINE(performance-string-view-conversions): see StampFlacTags.
+    TagLib::RIFF::WAV::File f(std::wstring(path).c_str(), true);
+    if (!f.isValid()) return false;
+
+    TagLib::PropertyMap props;
+    props.insert("TITLE", WstrToTagLibString(title));
+    props.insert("ARTIST", WstrToTagLibString(artist));
+    props.insert("ALBUM", WstrToTagLibString(album));
+    TagLib::PropertyMap rejected = f.setProperties(props);
+    if (!rejected.isEmpty()) return false;
     return f.save();
 }
 
@@ -549,6 +612,199 @@ int main() {
             CHECK(meta.album.empty(), "partial FLAC album is empty");
             CHECK(meta.trackNumber == 42, "partial FLAC track number present");
         }
+
+        RemoveTempDir(root);
+    }
+    printf("\n");
+
+    // ================================================================
+    // Test 11: Unicode metadata survives both formats unchanged
+    // ================================================================
+    {
+        const std::wstring title = L"T\u00EDtulo \u65E5\u672C";
+        const std::wstring artist = L"Artista \U0001F3B5";
+        const std::wstring album = L"\u00C1lbum \u4E16\u754C";
+
+        std::wstring flacPath = CreateMinimalFlac(root, L"unicode.flac");
+        Check(!flacPath.empty(), "minimal FLAC created for Unicode test");
+        Check(StampFlacTextTags(flacPath, title, artist, album),
+              "Unicode FLAC tags stamped");
+
+        auto flacResult = kessoku::library::ReadTrackMetadata(
+            std::filesystem::path(flacPath));
+        CHECK(flacResult.IsOk(), "Unicode FLAC metadata read succeeds");
+        if (flacResult.IsOk()) {
+            const auto& meta = flacResult.Value();
+            CHECK(meta.title == title, "Unicode FLAC title preserved");
+            CHECK(meta.artist == artist, "Unicode FLAC artist preserved");
+            CHECK(meta.album == album, "Unicode FLAC album preserved");
+        }
+
+        std::wstring wavPath = CreateMinimalWav(root, L"unicode.wav");
+        Check(!wavPath.empty(), "minimal WAV created for Unicode test");
+        Check(StampWavTextTags(wavPath, title, artist, album),
+              "Unicode WAV tags stamped");
+
+        auto wavResult = kessoku::library::ReadTrackMetadata(
+            std::filesystem::path(wavPath));
+        CHECK(wavResult.IsOk(), "Unicode WAV metadata read succeeds");
+        if (wavResult.IsOk()) {
+            const auto& meta = wavResult.Value();
+            CHECK(meta.title == title, "Unicode WAV title preserved");
+            CHECK(meta.artist == artist, "Unicode WAV artist preserved");
+            CHECK(meta.album == album, "Unicode WAV album preserved");
+        }
+
+        RemoveTempDir(root);
+    }
+    printf("\n");
+
+    // ================================================================
+    // Test 12: Uppercase extensions still choose the correct reader
+    // ================================================================
+    {
+        std::wstring flacPath = CreateMinimalFlac(root, L"upper.FLAC");
+        Check(!flacPath.empty(), "minimal FLAC created for uppercase test");
+        Check(StampFlacTags(flacPath, L"Upper FLAC", L"A", L"B", 11),
+              "uppercase FLAC tags stamped");
+        auto flacResult = kessoku::library::ReadTrackMetadata(
+            std::filesystem::path(flacPath));
+        CHECK(flacResult.IsOk(), "uppercase .FLAC metadata read succeeds");
+        if (flacResult.IsOk()) {
+            CHECK(flacResult.Value().title == L"Upper FLAC",
+                  "uppercase .FLAC title matches");
+            CHECK(flacResult.Value().trackNumber == 11,
+                  "uppercase .FLAC track matches");
+        }
+
+        std::wstring wavPath = CreateMinimalWav(root, L"upper.WAV");
+        Check(!wavPath.empty(), "minimal WAV created for uppercase test");
+        Check(StampWavDirect(wavPath, L"Upper WAV", L"A", L"B", 12),
+              "uppercase WAV tags stamped");
+        auto wavResult = kessoku::library::ReadTrackMetadata(
+            std::filesystem::path(wavPath));
+        CHECK(wavResult.IsOk(), "uppercase .WAV metadata read succeeds");
+        if (wavResult.IsOk()) {
+            CHECK(wavResult.Value().title == L"Upper WAV",
+                  "uppercase .WAV title matches");
+            CHECK(wavResult.Value().trackNumber == 12,
+                  "uppercase .WAV track matches");
+        }
+
+        RemoveTempDir(root);
+    }
+    printf("\n");
+
+    // ================================================================
+    // Test 13: Malformed TRACKNUMBER text is parsed defensively
+    // ================================================================
+    {
+        struct TrackCase {
+            const wchar_t* text;
+            uint32_t expected;
+        };
+        const TrackCase cases[] = {
+            {L"0007", 7},
+            {L"7/12", 7},
+            {L" 7", 7},
+            {L"7 ", 7},
+            {L" 7 ", 7},
+            {L"7 / 12", 7},
+            {L"7/", 7},
+            {L"/12", 0},
+            {L"0", 0},
+            {L"-3", 0},
+            {L"+7", 0},
+            {L"7.0", 0},
+            {L"not-a-number", 0},
+            {L"\u0667", 0},
+            {L"\uFF17", 0},
+            {L"7\u00A0", 0},
+            {L"7\t", 7},
+            {L"4294967295", 4294967295u},
+            {L"4294967296", 0},
+            {L"9999999999999999999999999999999999999999", 0},
+            {L"  ", 0},
+        };
+
+        int caseIndex = 0;
+        for (const TrackCase& testCase : cases) {
+            const std::wstring suffix = std::to_wstring(caseIndex++);
+            const std::wstring flacPath =
+                CreateMinimalFlac(root, L"track_" + suffix + L".flac");
+            const std::wstring wavPath =
+                CreateMinimalWav(root, L"track_" + suffix + L".wav");
+
+            Check(!flacPath.empty(),
+                  "FLAC created for malformed track-number case");
+            Check(!wavPath.empty(),
+                  "WAV created for malformed track-number case");
+
+            if (!flacPath.empty()) {
+                Check(StampFlacTrackText(flacPath, testCase.text),
+                      "FLAC track-number text stamped");
+                const auto result = kessoku::library::ReadTrackMetadata(
+                    std::filesystem::path(flacPath));
+                if (result.IsOk()) {
+                    const std::wstring desc =
+                        std::wstring(L"FLAC track '") + testCase.text +
+                        L"' parses defensively";
+                    if (result.Value().trackNumber != testCase.expected) {
+                        wprintf(L"  expected %u, got %u\n",
+                                testCase.expected,
+                                result.Value().trackNumber);
+                    }
+                    CHECK(result.Value().trackNumber == testCase.expected,
+                          desc.c_str());
+                } else {
+                    Check(false, "FLAC malformed track-number read succeeds");
+                }
+            }
+
+            if (!wavPath.empty()) {
+                Check(StampWavTrackText(wavPath, testCase.text),
+                      "WAV track-number text stamped");
+                const auto result = kessoku::library::ReadTrackMetadata(
+                    std::filesystem::path(wavPath));
+                if (result.IsOk()) {
+                    const std::wstring desc =
+                        std::wstring(L"WAV track '") + testCase.text +
+                        L"' parses defensively";
+                    if (result.Value().trackNumber != testCase.expected) {
+                        wprintf(L"  expected %u, got %u\n",
+                                testCase.expected,
+                                result.Value().trackNumber);
+                    }
+                    CHECK(result.Value().trackNumber == testCase.expected,
+                          desc.c_str());
+                } else {
+                    Check(false, "WAV malformed track-number read succeeds");
+                }
+            }
+        }
+
+        RemoveTempDir(root);
+    }
+    printf("\n");
+
+    // ================================================================
+    // Test 14: A read-only file is still readable
+    // ================================================================
+    {
+        std::wstring flacPath = CreateMinimalFlac(root, L"readonly_attr.flac");
+        Check(!flacPath.empty(), "minimal FLAC created for read-only attribute");
+        StampFlacTags(flacPath, L"Read Only Attr", L"A", L"B", 1);
+
+        Check(SetFileAttributesW(flacPath.c_str(), FILE_ATTRIBUTE_READONLY) != 0,
+              "read-only attribute set");
+        auto result = kessoku::library::ReadTrackMetadata(
+            std::filesystem::path(flacPath));
+        CHECK(result.IsOk(), "read-only FLAC metadata read succeeds");
+        if (result.IsOk()) {
+            CHECK(result.Value().title == L"Read Only Attr",
+                  "read-only FLAC title matches");
+        }
+        SetFileAttributesW(flacPath.c_str(), FILE_ATTRIBUTE_NORMAL);
 
         RemoveTempDir(root);
     }

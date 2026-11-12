@@ -2,7 +2,9 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdio>
+#include <filesystem>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -297,11 +299,99 @@ int main() {
           uncResult.GetError().code == kessoku::core::ErrorCode::InvalidPath,
           "Create() with a UNC share returns InvalidPath");
 
+    // (p) An empty path is not a usable library root.
+    auto emptyResult = kessoku::core::LibraryRoot::Create(L"");
+    CHECK(emptyResult.IsErr(), "Create() with an empty path returns Err");
+
+    // (q) A file is not a library root. CreateFileW accepts files with
+    // FILE_FLAG_BACKUP_SEMANTICS, so Create() must explicitly reject them.
+    auto fileRootResult = kessoku::core::LibraryRoot::Create(rootFile);
+    CHECK(fileRootResult.IsErr() &&
+          fileRootResult.GetError().code ==
+              kessoku::core::ErrorCode::InvalidPath,
+          "Create() with a file path returns InvalidPath");
+
+    // (r) A trailing separator and forward slashes canonicalize to the same
+    // root and still contain its descendants.
+    auto trailingRoot = kessoku::core::LibraryRoot::Create(root + L"\\");
+    CHECK(trailingRoot.IsOk(), "Create() accepts a trailing separator");
+    if (trailingRoot.IsOk()) {
+        CHECK(trailingRoot.Value().Contains(rootFile),
+              "trailing-separator root contains its files");
+    }
+
+    std::wstring forwardRoot = root;
+    std::replace(forwardRoot.begin(), forwardRoot.end(), L'\\', L'/');
+    auto forwardResult = kessoku::core::LibraryRoot::Create(forwardRoot);
+    CHECK(forwardResult.IsOk(), "Create() accepts forward-slash paths");
+    if (forwardResult.IsOk()) {
+        CHECK(forwardResult.Value().Contains(rootFile),
+              "forward-slash root contains its files");
+    }
+
+    // (s) A dot-dot path that resolves back inside the root is still inside;
+    // a dot-dot path that escapes it is not.
+    CHECK(libRoot.Contains(root + L"\\nested\\..\\test.flac"),
+          "dot-dot traversal that stays inside root is accepted");
+    CHECK(!libRoot.Contains(root + L"\\nested\\..\\..\\escape.flac"),
+          "dot-dot traversal that escapes root is rejected");
+
+    // (t) Extended-length syntax for a path inside the root resolves to the
+    // same canonical path. Normalize first: the temp helper may leave a
+    // doubled separator, which the literal \\?\ form would not collapse.
+    const std::wstring canonicalRootFile =
+        std::filesystem::weakly_canonical(rootFile).wstring();
+    CHECK(libRoot.Contains(L"\\\\?\\" + canonicalRootFile),
+          "extended-length path inside root is accepted");
+
+    // (u) Unicode names must not confuse the case-insensitive prefix check.
+    std::wstring unicodeDir = root + L"\\m\u00FAsica";
+    if (CreateSubdir(root, L"m\u00FAsica")) {
+        std::wstring unicodeFile;
+        if (CreateFileInDir(unicodeDir, L"caf\u00E9.flac", &unicodeFile)) {
+            CHECK(libRoot.Contains(unicodeFile),
+                  "Unicode path inside root is accepted");
+        } else {
+            printf("SKIP: Unicode file test (could not create file)\n");
+        }
+    } else {
+        printf("SKIP: Unicode directory test (could not create directory)\n");
+    }
+
+    // (v) A junction inside the root pointing to another directory inside
+    // the root resolves inside the boundary and is accepted by Contains().
+    // (The scanner deliberately does not traverse reparse points at all.)
+    std::wstring insideTarget = root + L"\\inside_target";
+    std::wstring insideJunction = root + L"\\inside_link";
+    if (CreateSubdir(root, L"inside_target")) {
+        CreateFileInDir(insideTarget, L"inside.flac");
+        if (CreateJunction(insideJunction, insideTarget)) {
+            CHECK(libRoot.Contains(insideJunction + L"\\inside.flac"),
+                  "junction inside root pointing inside is accepted");
+            RemoveDirectoryW(insideJunction.c_str());
+        } else {
+            printf("SKIP: inside-root junction test (could not create)\n");
+        }
+    }
+
+    // (w) Empty and relative candidates have no resolved file inside the
+    // root, so they must never be accepted by the boundary check.
+    CHECK(!libRoot.Contains(L""), "empty candidate path is rejected");
+    CHECK(!libRoot.Contains(L"relative.flac"),
+          "relative candidate path is rejected");
+
+    // (x) Win32 accepts forward slashes; the same file must stay inside.
+    std::wstring forwardFile = rootFile;
+    std::replace(forwardFile.begin(), forwardFile.end(), L'\\', L'/');
+    CHECK(libRoot.Contains(forwardFile),
+          "forward-slash path inside root is accepted");
+
     // --- Cleanup ---
-    DeleteFileW(rootFile.c_str());
-    DeleteFileW(nestedFile.c_str());
-    RemoveDirectoryW(nestedDir.c_str());
-    RemoveDirectoryW(root.c_str());
+    std::error_code cleanupEc;
+    std::filesystem::remove_all(root, cleanupEc);
+    std::filesystem::remove_all(tempDir + L"\\kessoku_junction_target",
+                                cleanupEc);
+    DeleteFileW((tempDir + L"\\kessoku_symlink_target.flac").c_str());
 
     std::wprintf(L"\n=== Results: %d failures ===\n", gFailures);
     return gFailures;

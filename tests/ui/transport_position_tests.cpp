@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <random>
 #include <string>
 
 namespace {
@@ -22,6 +23,7 @@ void Check(bool condition, const char* testName, const char* desc,
 
 using kessoku::ui::BarToFrame;
 using kessoku::ui::FormatTrackTime;
+using kessoku::ui::kSeekScale;
 using kessoku::ui::PositionToBar;
 
 // 10 min @ 44.1 kHz, 10 min @ 192 kHz, and the uint32_t ceiling.
@@ -144,6 +146,45 @@ void TestFormatTime() {
     CHECK(FormatTrackTime(158715900u, 44100) == L"59:59",
           "3599 seconds -> 59:59");
     CHECK(FormatTrackTime(12345, 0) == L"0:00", "rate 0 -> 0:00, no divide");
+    CHECK(FormatTrackTime(0xFFFFFFFFu, 1) == L"71582788:15",
+          "max frames at 1 Hz does not overflow");
+}
+
+void TestRandomProperties() {
+    std::mt19937 rng(0x4B455353u);
+    bool ok = true;
+
+    for (int i = 0; i < 200000; ++i) {
+        const uint32_t total = static_cast<uint32_t>(rng());
+        uint32_t position = 0;
+        if (total > 0) {
+            const uint64_t width = static_cast<uint64_t>(total) + 1u;
+            position = static_cast<uint32_t>(rng() % width);
+        }
+
+        const int bar = PositionToBar(position, total);
+        if (bar < 0 || bar > kSeekScale) {
+            ok = false;
+            break;
+        }
+
+        const uint32_t frame = BarToFrame(bar, total);
+        if (frame > total) {
+            ok = false;
+            break;
+        }
+
+        const int randomBar = static_cast<int>(rng());
+        const uint32_t randomFrame = BarToFrame(randomBar, total);
+        if (randomFrame > total) {
+            ok = false;
+            break;
+        }
+    }
+
+    CHECK(ok, "randomized transport mappings stay in range");
+    CHECK(PositionToBar(0xFFFFFFFFu, 0xFFFFFFFFu) == kSeekScale,
+          "position == total maps to the end of the seek bar");
 }
 
 } // namespace
@@ -157,6 +198,7 @@ int main() {
     TestMonotonic();
     TestRoundTrip();
     TestFormatTime();
+    TestRandomProperties();
 
     std::wprintf(L"\n=== Results: %d failures ===\n", gFailures);
     return gFailures;

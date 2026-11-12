@@ -108,3 +108,64 @@ target_link_libraries(transport_position_tests PRIVATE kessoku_build_options)
 add_test(NAME transport_position_tests COMMAND transport_position_tests)
 
 kessoku_copy_asan_runtime(transport_position_tests)
+
+add_executable(format_tests
+    audio/format_tests.cpp
+)
+
+target_include_directories(format_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core/include
+    ${CMAKE_SOURCE_DIR}/src/audio/include
+    ${CMAKE_SOURCE_DIR}/src/library/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/shared
+)
+
+target_link_libraries(format_tests PRIVATE
+    kessoku_core
+    kessoku_audio
+    kessoku_library
+    test_helpers
+    FLAC::FLAC
+    TagLib::TagLib
+)
+
+target_link_libraries(format_tests PRIVATE kessoku_build_options)
+
+add_test(NAME format_tests COMMAND format_tests)
+
+kessoku_copy_asan_runtime(format_tests)
+
+add_executable(performance_tests
+    performance/performance_tests.cpp
+)
+
+target_include_directories(performance_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/core/include
+    ${CMAKE_SOURCE_DIR}/src/audio/include
+    ${CMAKE_SOURCE_DIR}/src/library/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/shared
+)
+
+target_link_libraries(performance_tests PRIVATE
+    kessoku_core
+    kessoku_audio
+    kessoku_library
+    test_helpers
+    FLAC::FLAC
+    TagLib::TagLib
+)
+
+target_link_libraries(performance_tests PRIVATE kessoku_build_options)
+
+if(KESSOKU_ENABLE_ASAN)
+    target_compile_definitions(performance_tests PRIVATE
+        KESSOKU_PERFORMANCE_ASAN=1
+    )
+endif()
+
+add_test(NAME performance_tests COMMAND performance_tests)
+
+set_tests_properties(performance_tests PROPERTIES RUN_SERIAL TRUE)
+
+kessoku_copy_asan_runtime(performance_tests)

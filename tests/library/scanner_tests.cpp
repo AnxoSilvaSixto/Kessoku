@@ -410,6 +410,184 @@ int main() {
     }
     printf("\n");
 
+    // ================================================================
+    // Test 9: Extension matching uses only the final extension and rejects
+    // names that merely contain .flac or .wav.
+    // ================================================================
+    {
+        std::wstring root = CreateTempDir(L"\\kessoku_scan_test9");
+        if (root.empty()) {
+            fprintf(stderr, "FATAL: Could not create test9 root\n");
+            return 1;
+        }
+
+        std::wstring f1, f2, f3, f4;
+        CreateFileInDir(root, L"real.flac", &f1);
+        CreateFileInDir(root, L"real.wav", &f2);
+        CreateFileInDir(root, L"double.wav.flac", &f3);
+        CreateFileInDir(root, L"double.flac.wav", &f4);
+
+        CreateFileInDir(root, L"backup.flac.bak");
+        CreateFileInDir(root, L"fake.wav.exe");
+        CreateFileInDir(root, L"almost.flacx");
+        CreateFileInDir(root, L"almost.wavx");
+        CreateFileInDir(root, L"no_extension");
+        CreateFileInDir(root, L"dot.flac.txt");
+
+        // A leading dot makes the name a dotfile, not a file with a .flac or
+        // .wav extension; an extensionless name is not audio either.
+        std::wstring dotFlac, dotWav, bareFlac, bareWav;
+        CreateFileInDir(root, L".flac", &dotFlac);
+        CreateFileInDir(root, L".wav", &dotWav);
+        CreateFileInDir(root, L"FLAC", &bareFlac);
+        CreateFileInDir(root, L"WAV", &bareWav);
+
+        auto result = kessoku::core::LibraryRoot::Create(root);
+        if (!result.IsOk()) {
+            fprintf(stderr, "FATAL: LibraryRoot::Create failed: %s\n",
+                    result.GetError().message.data());
+            return 1;
+        }
+
+        auto scanResult = kessoku::library::Scan(result.Value());
+        CHECK(scanResult.files.size() == 4,
+              "only final-extension audio names are found");
+        CHECK(PathContains(scanResult.files, f1), "real.flac found");
+        CHECK(PathContains(scanResult.files, f2), "real.wav found");
+        CHECK(PathContains(scanResult.files, f3), "double.wav.flac found");
+        CHECK(PathContains(scanResult.files, f4), "double.flac.wav found");
+        CHECK(!PathContains(scanResult.files, dotFlac),
+              "dotfile .flac is not treated as an audio file");
+        CHECK(!PathContains(scanResult.files, dotWav),
+              "dotfile .wav is not treated as an audio file");
+        CHECK(!PathContains(scanResult.files, bareFlac),
+              "extensionless FLAC name is not audio");
+        CHECK(!PathContains(scanResult.files, bareWav),
+              "extensionless WAV name is not audio");
+        CHECK(scanResult.skipped.empty(),
+              "non-audio extensions produce no skipped entries");
+
+        RemoveTempDir(root);
+    }
+    printf("\n");
+
+    // ================================================================
+    // Test 10: Unicode, hidden, zero-byte, directory-with-audio-extension,
+    // and deep nesting all behave without losing audio files.
+    // ================================================================
+    {
+        std::wstring root = CreateTempDir(L"\\kessoku_scan_test10");
+        if (root.empty()) {
+            fprintf(stderr, "FATAL: Could not create test10 root\n");
+            return 1;
+        }
+
+        std::wstring unicodeFile;
+        CreateSubdir(root, L"m\u00FAsica");
+        CreateFileInDir(root + L"\\m\u00FAsica", L"caf\u00E9.flac",
+                        &unicodeFile);
+
+        std::wstring zeroFile;
+        CreateFileInDir(root, L"zero.wav", &zeroFile);
+
+        std::wstring hiddenFile;
+        CreateFileInDir(root, L"hidden.flac", &hiddenFile);
+        SetFileAttributesW(hiddenFile.c_str(), FILE_ATTRIBUTE_HIDDEN);
+
+        CreateSubdir(root, L"album.flac");
+        std::wstring insideAlbumDir;
+        CreateFileInDir(root + L"\\album.flac", L"inside.flac",
+                        &insideAlbumDir);
+
+        std::wstring deepDir = root;
+        for (int i = 0; i < 32; ++i) {
+            const std::wstring name = L"d" + std::to_wstring(i);
+            if (!CreateSubdir(deepDir, name)) {
+                break;
+            }
+            deepDir += L"\\" + name;
+        }
+        std::wstring deepFile;
+        CreateFileInDir(deepDir, L"deep.flac", &deepFile);
+
+        auto result = kessoku::core::LibraryRoot::Create(root);
+        if (!result.IsOk()) {
+            fprintf(stderr, "FATAL: LibraryRoot::Create failed: %s\n",
+                    result.GetError().message.data());
+            return 1;
+        }
+
+        auto scanResult = kessoku::library::Scan(result.Value());
+        CHECK(PathContains(scanResult.files, unicodeFile),
+              "Unicode filename is found");
+        CHECK(PathContains(scanResult.files, zeroFile),
+              "zero-byte audio file is listed by the scanner");
+        CHECK(PathContains(scanResult.files, hiddenFile),
+              "hidden audio file is found");
+        CHECK(PathContains(scanResult.files, insideAlbumDir),
+              "directory named album.flac is traversed");
+        CHECK(PathContains(scanResult.files, deepFile),
+              "audio file at 32 levels of nesting is found");
+        CHECK(scanResult.files.size() == 5,
+              "exactly five audio files in the mixed edge-case tree");
+        CHECK(scanResult.skipped.empty(),
+              "mixed edge-case tree has no skipped entries");
+
+        RemoveTempDir(root);
+    }
+    printf("\n");
+
+    // ================================================================
+    // Test 11: A junction inside the root pointing to another directory
+    // inside the root is still not followed. Target files must be found
+    // through their real path exactly once, never duplicated through the
+    // junction.
+    // ================================================================
+    {
+        std::wstring root = CreateTempDir(L"\\kessoku_scan_test11");
+        if (root.empty()) {
+            fprintf(stderr, "FATAL: Could not create test11 root\n");
+            return 1;
+        }
+
+        std::wstring realFile;
+        CreateFileInDir(root, L"real.flac", &realFile);
+        std::wstring targetFile;
+        CreateSubdir(root, L"target");
+        CreateFileInDir(root + L"\\target", L"inside.flac", &targetFile);
+
+        std::wstring insideJunction = root + L"\\link_to_target";
+        bool junctionOk = CreateJunction(insideJunction, root + L"\\target");
+
+        auto result = kessoku::core::LibraryRoot::Create(root);
+        if (!result.IsOk()) {
+            fprintf(stderr, "FATAL: LibraryRoot::Create failed: %s\n",
+                    result.GetError().message.data());
+            return 1;
+        }
+
+        auto scanResult = kessoku::library::Scan(result.Value());
+        CHECK(PathContains(scanResult.files, realFile),
+              "root file found with an inside-root junction present");
+        CHECK(PathContains(scanResult.files, targetFile),
+              "junction target file found through its real path");
+
+        if (junctionOk) {
+            CHECK(scanResult.files.size() == 2,
+                  "inside-root junction causes no duplicate traversal");
+            CHECK(SkippedContainsReason(scanResult.skipped,
+                                        std::wstring_view(insideJunction),
+                                        "reparse point (not followed)"),
+                  "inside-root junction appears in skipped");
+            RemoveDirectoryW(insideJunction.c_str());
+        } else {
+            printf("SKIP: inside-root junction test (could not create)\n");
+        }
+
+        RemoveTempDir(root);
+    }
+    printf("\n");
+
     std::wprintf(L"=== Results: %d failures ===\n", gFailures);
     return gFailures;
 }

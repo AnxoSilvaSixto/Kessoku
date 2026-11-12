@@ -1232,10 +1232,158 @@ void RunFlacSeekRestoreFailureTest() {
     CleanupTempFlac(flacPath);
 }
 
+// Device-free validation: Player::Create must reject malformed or
+// unsupported input before touching audio hardware, so these cases behave
+// identically on a machine with no output device.
+void RunInvalidInputTests() {
+    wchar_t buf[MAX_PATH]{};
+    const DWORD len = GetTempPathW(MAX_PATH, buf);
+    if (len == 0 || len > MAX_PATH) {
+        printf("SKIP: invalid-input tests (no temp path)\n");
+        return;
+    }
+    const std::wstring dir =
+        std::wstring(buf) + L"\\kessoku_test_player_invalid_";
+    if (!CreateDirectoryW(dir.c_str(), nullptr) &&
+        GetLastError() != ERROR_ALREADY_EXISTS) {
+        printf("SKIP: invalid-input tests (could not create temp directory)\n");
+        return;
+    }
+
+    const auto expectCreateError =
+        [](std::wstring_view path, kessoku::core::ErrorCode code,
+           const char* desc) {
+            auto result = kessoku::audio::Player::Create(path);
+            CHECK(result.IsErr() && result.GetError().code == code, desc);
+        };
+
+    // Missing, empty, and non-file paths fail while parsing, never during
+    // device negotiation.
+    expectCreateError(L"", kessoku::core::ErrorCode::AudioInitFailed,
+                      "empty WAV path is rejected");
+    expectCreateError(dir + L"\\missing.wav",
+                      kessoku::core::ErrorCode::AudioInitFailed,
+                      "missing WAV path is rejected");
+    expectCreateError(dir + L"\\missing.flac",
+                      kessoku::core::ErrorCode::AudioInitFailed,
+                      "missing FLAC path is rejected");
+
+    const std::wstring directoryPath = dir + L"\\as_file.wav";
+    std::wstring directoryCreated = directoryPath;
+    if (CreateDirectoryW(directoryCreated.c_str(), nullptr) ||
+        GetLastError() == ERROR_ALREADY_EXISTS) {
+        expectCreateError(directoryPath,
+                          kessoku::core::ErrorCode::AudioInitFailed,
+                          "directory at a .wav path is rejected");
+        RemoveDirectoryW(directoryCreated.c_str());
+    }
+
+    // Random bytes must fail in the format parser.
+    const std::wstring randomWav = dir + L"\\random.wav";
+    const std::wstring randomFlac = dir + L"\\random.flac";
+    {
+        HANDLE hFile = CreateFileW(
+            randomWav.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+        bool wrote = false;
+        if (hFile != INVALID_HANDLE_VALUE) {
+            std::vector<uint8_t> bytes(1024);
+            for (size_t i = 0; i < bytes.size(); ++i) {
+                bytes[i] = static_cast<uint8_t>(i * 37u + 11u);
+            }
+            DWORD written = 0;
+            wrote = WriteFile(hFile, bytes.data(),
+                              static_cast<DWORD>(bytes.size()), &written,
+                              nullptr) != 0 &&
+                    written == bytes.size();
+            CloseHandle(hFile);
+        }
+        CHECK(wrote, "write random WAV fixture for Player::Create");
+        if (wrote) {
+            expectCreateError(randomWav,
+                              kessoku::core::ErrorCode::AudioInitFailed,
+                              "random bytes at a .wav path are rejected");
+        }
+
+        HANDLE hFlac = CreateFileW(
+            randomFlac.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+        wrote = false;
+        if (hFlac != INVALID_HANDLE_VALUE) {
+            std::vector<uint8_t> bytes(1024);
+            for (size_t i = 0; i < bytes.size(); ++i) {
+                bytes[i] = static_cast<uint8_t>(i * 53u + 7u);
+            }
+            DWORD written = 0;
+            wrote = WriteFile(hFlac, bytes.data(),
+                              static_cast<DWORD>(bytes.size()), &written,
+                              nullptr) != 0 &&
+                    written == bytes.size();
+            CloseHandle(hFlac);
+        }
+        CHECK(wrote, "write random FLAC fixture for Player::Create");
+        if (wrote) {
+            expectCreateError(randomFlac,
+                              kessoku::core::ErrorCode::AudioInitFailed,
+                              "random bytes at a .flac path are rejected");
+        }
+    }
+
+    // Structurally valid WAV with zero format fields fails before hardware.
+    const std::wstring zeroRateWav = dir + L"\\zero_rate.wav";
+    CHECK(CreateTestWav(zeroRateWav, 0, 16, 2, 0),
+          "write WAV with a zero sample rate");
+    expectCreateError(zeroRateWav,
+                      kessoku::core::ErrorCode::AudioInitFailed,
+                      "Player::Create rejects a zero WAV sample rate");
+    DeleteFileW(zeroRateWav.c_str());
+
+    const std::wstring zeroChannelsWav = dir + L"\\zero_channels.wav";
+    CHECK(CreateTestWav(zeroChannelsWav, 44100, 16, 0, 0),
+          "write WAV with zero channels");
+    expectCreateError(zeroChannelsWav,
+                      kessoku::core::ErrorCode::AudioInitFailed,
+                      "Player::Create rejects zero WAV channels");
+    DeleteFileW(zeroChannelsWav.c_str());
+
+    // PCM bit depths without an exact exclusive-mode container are a format
+    // error, not a device error.
+    const std::wstring depthWav = dir + L"\\depth20.wav";
+    CHECK(CreateTestWav(depthWav, 44100, 20, 2, 0),
+          "write 20-bit WAV");
+    expectCreateError(depthWav,
+                      kessoku::core::ErrorCode::FormatNotSupported,
+                      "Player::Create rejects a 20-bit WAV");
+    DeleteFileW(depthWav.c_str());
+
+    const std::wstring depthFlac = dir + L"\\depth12.flac";
+    CHECK(CreateTestFlac(depthFlac, 44100, 12, 1, 100),
+          "write 12-bit FLAC");
+    expectCreateError(depthFlac,
+                      kessoku::core::ErrorCode::FormatNotSupported,
+                      "Player::Create rejects a 12-bit FLAC");
+    DeleteFileW(depthFlac.c_str());
+
+    // A FLAC whose STREAMINFO has no total sample count cannot be played
+    // (position/duration would be unknown), so it fails before hardware.
+    const std::wstring unknownLengthFlac = dir + L"\\unknown_length.flac";
+    CHECK(CreateTestFlac(unknownLengthFlac, 44100, 16, 2, 0),
+          "write FLAC with unknown total samples");
+    expectCreateError(unknownLengthFlac,
+                      kessoku::core::ErrorCode::AudioInitFailed,
+                      "Player::Create rejects a FLAC with no sample count");
+    DeleteFileW(unknownLengthFlac.c_str());
+
+    RemoveDirectoryW(dir.c_str());
+}
+
 } // namespace
 
 int main() {
     std::wprintf(L"=== Player Tests ===\n\n");
+
+    RunInvalidInputTests();
+    printf("\n");
 
     // --- Test 1: Create Player from a valid WAV file ---
     {
