@@ -13,7 +13,8 @@ namespace {
 
 constexpr DWORD kPathBufferSize = 32767;
 
-std::wstring ResolveFinalPath(std::wstring_view path) {
+std::wstring ResolveFinalPath(std::wstring_view path,
+                              bool* isDirectory = nullptr) {
     std::wstring nullTerminated(path);
     HANDLE h = CreateFileW(
         nullTerminated.c_str(),
@@ -27,6 +28,15 @@ std::wstring ResolveFinalPath(std::wstring_view path) {
 
     if (h == INVALID_HANDLE_VALUE) {
         return {};
+    }
+
+    if (isDirectory != nullptr) {
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (!GetFileInformationByHandle(h, &info)) {
+            CloseHandle(h);
+            return {};
+        }
+        *isDirectory = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
     }
 
     std::array<WCHAR, kPathBufferSize> buf{};
@@ -108,7 +118,8 @@ Result<LibraryRoot> LibraryRoot::Create(std::wstring_view selectedPath) {
             "Library folder must be local; network shares are not supported");
     }
 
-    std::wstring resolved = ResolveFinalPath(selectedPath);
+    bool isDirectory = false;
+    std::wstring resolved = ResolveFinalPath(selectedPath, &isDirectory);
 
     if (resolved.empty()) {
         DWORD gle = GetLastError();
@@ -120,6 +131,12 @@ Result<LibraryRoot> LibraryRoot::Create(std::wstring_view selectedPath) {
         return kessoku::core::Result<LibraryRoot>::Err(
             ErrorCode::NotFound,
             "Library path not found or invalid");
+    }
+
+    if (!isDirectory) {
+        return kessoku::core::Result<LibraryRoot>::Err(
+            ErrorCode::InvalidPath,
+            "Library path must be a directory");
     }
 
     // A mapped network drive can normalize to the share's extended UNC path.

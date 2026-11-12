@@ -104,6 +104,11 @@ std::string ParseWavFormat(const std::wstring& path, WavFormat& out) {
             out.channelCount = fmt->numChannels;
             out.byteRate = fmt->byteRate;
             out.blockAlign = fmt->blockAlign;
+
+            if (out.sampleRate == 0 || out.channelCount == 0 ||
+                out.bitsPerSample == 0) {
+                return "Invalid WAV file: zero PCM format field";
+            }
             return {}; // success
         }
 
