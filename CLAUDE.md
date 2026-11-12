@@ -730,7 +730,7 @@ Prioritize tests for:
 - malformed or unexpected metadata;
 - regressions discovered during development.
 
-Build-optimization work is verified differently from behavior tests. A Release claim needs an actual Release build; a PGO claim needs a full `scripts\pgo.ps1` run whose evidence includes profile coverage for the app and each trained DLL, 6/6 CTest on the optimized build, smoke exit code 0, and no `pgort140.dll` imports in deployed binaries. Tests verify the optimized build; they are not PGO training targets.
+Build-optimization work is verified differently from behavior tests. A Release claim needs an actual Release build; a PGO claim needs a full `scripts\pgo.ps1` run whose evidence includes profile coverage for the app and each trained DLL, 8/8 CTest on the optimized build, smoke exit code 0, and no `pgort140.dll` imports in deployed binaries. Tests verify the optimized build; they are not PGO training targets.
 Do not distort architecture to make tests easier.
  
 Do not remove a meaningful test merely because it is inconvenient.

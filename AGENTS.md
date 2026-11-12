@@ -55,9 +55,9 @@ Stop and flag (don't decide, don't guess) before: adding a dependency, adding an
 ## Verification
 
 - Build: `cmake --preset default` then `cmake --build --preset default` (Visual Studio 2026, Debug, x64-windows-native via the project-local triplet). `cmake --build --preset release` covers Release.
-- Tests: `ctest --preset default` (all six CTest executables). ASan: `cmake --preset asan`, `cmake --build --preset asan`, `ctest --preset asan`. Release: `ctest --preset release`.
+- Tests: `ctest --preset default` (all eight CTest executables). ASan: `cmake --preset asan`, `cmake --build --preset asan`, `ctest --preset asan`. Release: `ctest --preset release`.
 - Optimization: Release is expected to compile with the flags above and link with `/LTCG`. Don't claim optimization or PGO is active without build/link output or `dumpbin` evidence.
-- PGO: `scripts\pgo.ps1` is the only supported workflow. It needs an interactive desktop and must finish with 6/6 CTest, smoke exit code 0, and no `pgort140.dll` imports in `Kessoku.exe` or the deployed DLLs. It deletes and rebuilds `build-pgo` plus the `x64-windows-native-pgo` vcpkg trees, so don't run it alongside another build or audio test. When claiming PGO work, report the app and per-DLL coverage from `build-pgo\pgo\summary*.txt`.
+- PGO: `scripts\pgo.ps1` is the only supported workflow. It needs an interactive desktop and must finish with 8/8 CTest, smoke exit code 0, and no `pgort140.dll` imports in `Kessoku.exe` or the deployed DLLs. It deletes and rebuilds `build-pgo` plus the `x64-windows-native-pgo` vcpkg trees, so don't run it alongside another build or audio test. When claiming PGO work, report the app and per-DLL coverage from `build-pgo\pgo\summary*.txt`.
 - Compile commands for clangd: `scripts\setup-ninja-env.bat` writes `build/ninja/compile_commands.json`; this is a developer aid, not the build of record.
 - Smoke test: run the built `Kessoku.exe` from its own output directory (`build\Debug`, `build\Release`, or `build-pgo\Release`), confirm the window opens, and confirm exit code 0 after closing.
 - For anything touching audio, filesystem paths, or metadata writes: test the failure paths explicitly (device loss, path-escape attempts, malformed tags), not just the happy path. These are correctness/security-critical, not places to spot-check.

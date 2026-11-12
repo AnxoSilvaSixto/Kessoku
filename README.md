@@ -38,6 +38,25 @@ consume a local profile-guided optimization database (see below).
 one audio test suite at a time: two `ctest` invocations in parallel (for
 example, Debug and Release) contend for the same endpoint and one will fail.
 
+### Tests and benchmarks
+
+`ctest` runs eight executables: `library_root_tests`, `utf8_tests`,
+`scanner_tests`, `metadata_tests`, `player_tests`, `transport_position_tests`,
+`format_tests`, and `performance_tests`.
+
+`format_tests` feeds malformed, truncated, and deterministically random
+WAV/FLAC/metadata inputs through the parsers and checks that content/extension
+mismatches fail cleanly instead of reporting empty metadata.
+
+`performance_tests` times complete user-visible workloads: scanning 2,000
+files, scanning and reading metadata for a 500-track library at launch, 2,000
+containment checks, 100 WAV and FLAC metadata reads, opening and decoding a
+10-second FLAC, transport conversions, time formatting, and UTF-8 path
+round-trips. Each scenario is warmed up, measured three times, and held to the
+400 ms Doherty Threshold. AddressSanitizer builds execute the same workloads
+but do not enforce wall-clock budgets, because sanitizer instrumentation
+changes timing rather than application behavior.
+
 ### Presets
 
 | Preset | Purpose |
