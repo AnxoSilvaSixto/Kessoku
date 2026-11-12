@@ -729,6 +729,8 @@ Prioritize tests for:
 - playback lifecycle;
 - malformed or unexpected metadata;
 - regressions discovered during development.
+
+Build-optimization work is verified differently from behavior tests. A Release claim needs an actual Release build; a PGO claim needs a full `scripts\pgo.ps1` run whose evidence includes profile coverage for the app and each trained DLL, 6/6 CTest on the optimized build, smoke exit code 0, and no `pgort140.dll` imports in deployed binaries. Tests verify the optimized build; they are not PGO training targets.
 Do not distort architecture to make tests easier.
  
 Do not remove a meaningful test merely because it is inconvenient.
@@ -792,8 +794,43 @@ Do not repeatedly reopen settled decisions unless new evidence materially change
 - More UI code to hand-write than a higher-level toolkit would require.
 - Revisit the indexing decision only if launch-scan time is ever measured to be a real problem, per Section 20.
 - Still open: installer/distribution format, exact metadata field editing surface, future DSD implementation.
+
 ---
- 
+
+## 16.2 Architecture Decision Record - Build Quality & Profile-Guided Optimization (2026-11-12)
+
+**Decision:**
+
+- Release and RelWithDebInfo builds target this machine's AMD Ryzen 7 5700X (Zen 3) with MSVC's maximum-speed profile: `/O2 /Ob3 /Oi /Ot /Oy /GF /Gy /Gw /Zc:inline /arch:AVX2 /fp:fast`, plus `/GL` and `/LTCG /OPT:REF /OPT:ICF`. Debug and ASan builds stay unoptimized.
+- The project-local `x64-windows-native` vcpkg triplet applies the same Release tuning to dependency libraries, so the app and its dependency DLLs share one machine-specific code-generation profile.
+- Profile-guided optimization is opt-in through `KESSOKU_PGO=OFF|GENERATE|USE`, the `pgo-generate`/`pgo-use` presets, and `scripts/pgo.ps1`. Normal `default`/`release` builds are unchanged.
+- `scripts/pgo.ps1` trains the real `Kessoku.exe` and the dependency DLLs on a local scan/playback workload, merges the collected `.pgc` files, and relinks app and DLLs with `/USEPROFILE`. The `x64-windows-native-pgo` triplet adds `/GENPROFILE` to the dependency build.
+- PGO profiles, training media, and PGO build output stay in the gitignored `build-pgo/` tree and are never committed.
+
+**Reason:**
+
+- This is a single-machine personal player; targeting the owner's CPU is a confirmed requirement rather than a portability trade-off to hedge. AVX2 is the highest ISA level the Ryzen 7 5700X supports, and `/arch:AVX2` also allows FMA and BMI.
+- `/Ob3`, `/Gw`, `/Zc:inline`, `/GL`, and `/LTCG` let MSVC inline, fold, and discard code within the app and within each dependency library that `/O2` alone cannot reach. `/fp:fast` is safe because PCM is integer and the only floating-point work is the WASAPI buffer-duration calculation.
+- PGO is intended to improve branch layout, inlining, and code placement using the real FLAC/WAV scan and playback paths. Training the app and dependency DLLs separately is necessary because each image has its own profile database, and most decode and tag work executes inside `FLAC.dll` and `tag.dll`.
+- Keeping PGO opt-in preserves simple, reproducible Debug/Release builds and avoids making the normal build depend on local training artifacts.
+
+**Rejected alternatives:**
+
+- Removing `/GS` or other security-weakening flags for speed: rejected; security outranks performance in the priority stack.
+- `/arch:AVX512`: unsupported by the Ryzen 7 5700X, so it would not build usable binaries.
+- Leaving dependencies at the stock `x64-windows` profile: the app would be tuned while its decoder and tag libraries remain generic, defeating whole-program and PGO benefits.
+- Training on tests or unrelated binaries: their code paths do not describe the real UI workload, and profiles are link-specific.
+- Hand-written assembly or per-function manual tuning: no demonstrated need per 16.1.
+
+**Consequences:**
+
+- Release binaries require an AVX2-capable CPU; they are tuned for Zen 3 and are not portable to older x64 hardware. A different build machine needs its own flags/triplet, and these settings must not be treated as portable defaults.
+- PGO is an interactive local workflow and must be re-run after meaningful code or dependency changes. The repository carries no profile data, and a clean clone produces an untrained Release build.
+- Verification must distinguish a normal Release build from a PGO Release build, and must prove the PGO runtime (`pgort140.dll`) is absent from `Kessoku.exe` and every deployed DLL when PGO is claimed.
+- Profiles and PGO build trees are disposable local artifacts; deleting `build-pgo/` or the `x64-windows-native-pgo` vcpkg build trees only costs a retraining run.
+
+---
+
 ## 17. Current project state
  
 ### Decided
@@ -813,6 +850,8 @@ Do not repeatedly reopen settled decisions unless new evidence materially change
 - Programming language: C++ (16.1).
 - UI toolkit: native Win32 API + WTL (16.1).
 - Build system: CMake (16.1). Package manager: vcpkg (16.1).
+- Release build profile: maximum-speed MSVC flags for this Zen 3/AVX2 machine with `/GL` + `/LTCG`; app and dependency DLLs are both built through the project-local `x64-windows-native` triplet (16.2).
+- PGO: opt-in app + dependency training via `scripts\pgo.ps1`; profiles stay local under `build-pgo/` and are never committed (16.2).
 - Audio decode library: libFLAC (16.1). Tagging library: TagLib (16.1).
 - Library indexing: no persistent database for v1; in-memory index built by scanning the library root at launch (16.1).
 - Expected library scale: medium today (roughly 1,000–10,000 tracks), growing over time.
@@ -905,6 +944,7 @@ A task is complete only when:
 - the requested behavior is implemented locally or the requested analysis is complete;
 - the proposed/implemented change respects all confirmed product and security constraints;
 - relevant CI/local checks have evidence appropriate to the risk level;
+- claims about Release optimization or PGO are backed by actual build/link output, profile coverage, and runtime-import checks, not by the flags in the source alone;
 - the GitHub-visible diff contains no accidental unrelated changes;
 - remaining uncertainty is explicitly identified;
 - no unapproved feature or architectural commitment was smuggled into the change.

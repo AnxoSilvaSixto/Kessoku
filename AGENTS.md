@@ -22,13 +22,19 @@ If a task seems to require crossing one of these, stop and flag it — see "Your
 |---|---|
 | Language | C++ |
 | UI | Win32 API + WTL |
-| Build | CMake + vcpkg |
+| Build | CMake + vcpkg (project-local `x64-windows-native` triplet) |
 | Audio decode | libFLAC |
 | Tagging | TagLib |
 | Indexing | No database. In-memory index built by scanning the library root at launch. |
 | v1 scope | Browse, play, pause, seek only. No queue, shuffle, search, playlists, or gapless yet. |
 
-Full reasoning for each choice is in `CLAUDE.md` §16.1 if you want it — you don't need to re-derive or second-guess these.
+Full reasoning for each choice is in `CLAUDE.md` §16.1–16.2 if you want it — you don't need to re-derive or second-guess these.
+
+## Build tuning and PGO (decided — don't re-litigate)
+
+Release and RelWithDebInfo use MSVC's maximum-speed profile for this machine: `/O2 /Ob3 /Oi /Ot /Oy /GF /Gy /Gw /Zc:inline /arch:AVX2 /fp:fast`, with `/GL` and `/LTCG /OPT:REF /OPT:ICF`. Debug and ASan stay unoptimized. The project-local `triplets\x64-windows-native.cmake` builds Release vcpkg dependencies with the same tuning, so the app and its DLLs all target this AVX2/Zen 3 machine and are not portable to older x64 CPUs. The PGO presets use `triplets\x64-windows-native-pgo.cmake`, which adds `/GENPROFILE`.
+
+Profile-guided optimization is opt-in and local: `scripts\pgo.ps1` trains the real `Kessoku.exe` and the dependency DLLs, and all profiles and training media stay under the gitignored `build-pgo\` tree. Normal `default`/`release` builds neither produce nor consume profiles. Don't commit PGD/PGC files, and don't claim PGO is active for a normal build.
 
 **Still open, not yours to decide:** installer/distribution format, exact metadata field editing surface, future DSD implementation. If a task nudges toward deciding one of these, stop and flag it instead.
 
@@ -48,10 +54,12 @@ Stop and flag (don't decide, don't guess) before: adding a dependency, adding an
 
 ## Verification
 
-- Build: `cmake --preset default` then `cmake --build --preset default` (Visual Studio 2026, Debug, x64-windows). `cmake --build --preset release` covers Release.
-- Tests: `ctest --preset default` (all six CTest executables). ASan: `cmake --preset asan`, `cmake --build --preset asan`, `ctest --preset asan`.
+- Build: `cmake --preset default` then `cmake --build --preset default` (Visual Studio 2026, Debug, x64-windows-native via the project-local triplet). `cmake --build --preset release` covers Release.
+- Tests: `ctest --preset default` (all six CTest executables). ASan: `cmake --preset asan`, `cmake --build --preset asan`, `ctest --preset asan`. Release: `ctest --preset release`.
+- Optimization: Release is expected to compile with the flags above and link with `/LTCG`. Don't claim optimization or PGO is active without build/link output or `dumpbin` evidence.
+- PGO: `scripts\pgo.ps1` is the only supported workflow. It needs an interactive desktop and must finish with 6/6 CTest, smoke exit code 0, and no `pgort140.dll` imports in `Kessoku.exe` or the deployed DLLs. It deletes and rebuilds `build-pgo` plus the `x64-windows-native-pgo` vcpkg trees, so don't run it alongside another build or audio test. When claiming PGO work, report the app and per-DLL coverage from `build-pgo\pgo\summary*.txt`.
 - Compile commands for clangd: `scripts\setup-ninja-env.bat` writes `build/ninja/compile_commands.json`; this is a developer aid, not the build of record.
-- Smoke test: run `build\Debug\Kessoku.exe` from `build\Debug`, confirm the window opens, and confirm exit code 0 after closing.
+- Smoke test: run the built `Kessoku.exe` from its own output directory (`build\Debug`, `build\Release`, or `build-pgo\Release`), confirm the window opens, and confirm exit code 0 after closing.
 - For anything touching audio, filesystem paths, or metadata writes: test the failure paths explicitly (device loss, path-escape attempts, malformed tags), not just the happy path. These are correctness/security-critical, not places to spot-check.
 - If LSP diagnostics are available (clangd, auto-detected for this C++ codebase once `lsp` is turned on in `opencode.json`), treat them as a fast first-pass signal, not a substitute for an actual build. A clean build is what "done" means, not a clean diagnostics pane.
 - Never report a build, test, or check as passing unless you actually ran it and it actually passed. "Should work" is not a verification result.
@@ -84,6 +92,7 @@ Focused commits. Check `git diff` and `git status` before considering anything f
 
 - The requested behavior works, and you verified it — not assumed it.
 - No hard invariant was weakened, worked around, or reinterpreted.
+- If build flags, dependency builds, or PGO were touched, an actual Release/PGO build backs the claim: applied flags, profile coverage, and no PGO runtime import, not a Debug-only build.
 - No unrelated file changed.
 - Anything still uncertain is stated as uncertain, not glossed over.
 - No feature or dependency was added beyond what was asked.
