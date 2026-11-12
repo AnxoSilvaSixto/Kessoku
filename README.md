@@ -67,21 +67,30 @@ scripts\pgo.ps1
 The script builds `build-pgo` with `/LTCG /GENPROFILE`, generates a small
 FLAC/WAV training library under `build-pgo\training`, drives the real UI
 (folder pick, scan, play, pause, resume, seek, natural end-of-stream) for both
-codecs, merges the generated `.pgc` files into
-`build-pgo\pgo\Kessoku.pgd`, then reconfigures and relinks the app with
-`/LTCG /USEPROFILE`. It finishes with the Release CTest suite and a smoke test
-of the optimized binary. Use `-SkipTests` or `-SkipSmokeTest` to run only part
-of the workflow.
+codecs, merges the generated `.pgc` files into the matching profile databases,
+and relinks with `/LTCG /USEPROFILE`: first each vcpkg dependency DLL in its
+build tree, then the app. It finishes with the Release CTest suite and a smoke
+test of the optimized binary. Use `-SkipTests` or `-SkipSmokeTest` to run only
+part of the workflow.
+
+The `pgo-generate`/`pgo-use` presets use the separate
+`triplets\x64-windows-native-pgo.cmake` triplet, which adds `/GENPROFILE` to
+the same Zen 3 flags as the normal native triplet. Training exercises
+`FLAC.dll` (FLAC decode) and `tag.dll` (metadata); `z.dll` is loaded by
+TagLib and records whatever counters its scan path touches. Every dependency
+DLL is then relinked with `/USEPROFILE`, including untrained ones, which keeps
+the PGO runtime out of the deployed binaries. The script verifies with
+`dumpbin` that neither `Kessoku.exe` nor any deployed DLL imports
+`pgort140.dll`, then removes the runtime from the build tree.
 
 PGO needs an interactive desktop: the script controls the folder picker and
 transport controls, so leave the mouse and keyboard alone while it runs, and
-make sure no other audio test suite is using the endpoint. The `pgo-generate`
-build deploys the MSVC `pgort140.dll` runtime next to the instrumented binary;
-the final `/USEPROFILE` image does not import it. Only `Kessoku.exe` is
-instrumented: the vcpkg DLLs keep their native-triplet `/GL` + `/LTCG` build,
-without PGO. Profiles and training media stay under `build-pgo\` and
-are not committed. Re-run the script after meaningful code changes; each run
-forces a fresh `/GENPROFILE` link so stale counters are discarded.
+make sure no other audio test suite is using the endpoint. Each run deletes
+`build-pgo` and the `x64-windows-native-pgo` vcpkg build trees and clears the
+binary cache for the run, so instrumented packages are always rebuilt from
+source and stale counters cannot be reused. Profiles and training media stay
+under `build-pgo\` and are not committed. Re-run the script after meaningful
+code or dependency changes.
 
 `scripts\setup-ninja-env.bat` initializes the MSVC environment, configures the
 Ninja preset, builds it, and leaves `compile_commands.json` ready for clangd.

@@ -91,8 +91,10 @@ option(KESSOKU_ENABLE_ASAN "Building under the asan preset" OFF)
 # Opt-in profile-guided optimization. OFF keeps the normal build untouched.
 # GENERATE links the app with /LTCG /GENPROFILE to produce an instrumented
 # binary and a profile database; USE links it with /LTCG /USEPROFILE to
-# consume the trained database. Only the app is instrumented: the tests are
-# training drivers, not PGO targets, and the vcpkg DLLs are not re-instrumented.
+# consume the trained database. The tests are training drivers, not PGO
+# targets. Dependency DLLs are instrumented separately by the
+# x64-windows-native-pgo triplet and relinked by scripts/pgo.ps1, because each
+# DLL needs its own profile database.
 set(KESSOKU_PGO "OFF" CACHE STRING "PGO mode: OFF, GENERATE, or USE")
 set_property(CACHE KESSOKU_PGO PROPERTY STRINGS OFF GENERATE USE)
 set(KESSOKU_PGO_DIR "${CMAKE_BINARY_DIR}/pgo" CACHE PATH "Directory for the PGO profile database")
@@ -145,9 +147,10 @@ target_link_libraries(Kessoku PRIVATE
     TagLib::TagLib
 )
 
-# Wire the opt-in PGO modes into the app's Release link only. Tests and the
-# vcpkg DLLs stay out of it: the profile must describe Kessoku.exe itself,
-# and pgomgr rejects .pgc files from a different link than the .pgd.
+# Wire the opt-in PGO modes into the app's Release link only. The profile must
+# describe Kessoku.exe itself, and pgomgr rejects .pgc files from a different
+# link than the .pgd. Tests stay out; dependency DLLs have their own PGDs and
+# are relinked in their vcpkg build trees by scripts/pgo.ps1.
 if(NOT KESSOKU_PGO STREQUAL "OFF")
     string(TOUPPER "${KESSOKU_PGO}" _kessoku_pgo_mode)
     if(NOT _kessoku_pgo_mode MATCHES "^(GENERATE|USE)$")

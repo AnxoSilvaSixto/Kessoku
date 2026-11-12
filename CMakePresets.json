@@ -48,7 +48,8 @@
             "binaryDir": "${sourceDir}/build-pgo",
             "cacheVariables": {
                 "KESSOKU_PGO": "GENERATE",
-                "KESSOKU_PGO_DIR": "${sourceDir}/build-pgo/pgo"
+                "KESSOKU_PGO_DIR": "${sourceDir}/build-pgo/pgo",
+                "VCPKG_TARGET_TRIPLET": "x64-windows-native-pgo"
             }
         },
         {
