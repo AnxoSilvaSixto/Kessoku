@@ -326,6 +326,16 @@ int main() {
               "trailing-separator root contains its files");
     }
 
+    // A dot-dot component that resolves back to the selected directory must
+    // canonicalize to the same root, not store a path with ".." in it.
+    auto dotDotRoot = kessoku::core::LibraryRoot::Create(
+        root + L"\\nested\\..");
+    CHECK(dotDotRoot.IsOk(), "Create() accepts a dot-dot path to the root");
+    if (dotDotRoot.IsOk()) {
+        CHECK(dotDotRoot.Value().Contains(rootFile),
+              "dot-dot root contains its files");
+    }
+
     std::wstring forwardRoot = root;
     std::replace(forwardRoot.begin(), forwardRoot.end(), L'\\', L'/');
     auto forwardResult = kessoku::core::LibraryRoot::Create(forwardRoot);
@@ -374,6 +384,19 @@ int main() {
         if (CreateJunction(insideJunction, insideTarget)) {
             CHECK(libRoot.Contains(insideJunction + L"\\inside.flac"),
                   "junction inside root pointing inside is accepted");
+
+            // Selecting the junction as the library root must canonicalize
+            // to its target, and the resulting boundary must still contain
+            // files reached through the target's real path.
+            auto junctionRoot =
+                kessoku::core::LibraryRoot::Create(insideJunction);
+            CHECK(junctionRoot.IsOk(),
+                  "Create() accepts a junction to an inside directory");
+            if (junctionRoot.IsOk()) {
+                CHECK(junctionRoot.Value().Contains(insideTarget +
+                                                    L"\\inside.flac"),
+                      "junction root contains its resolved target files");
+            }
             RemoveDirectoryW(insideJunction.c_str());
         } else {
             printf("SKIP: inside-root junction test (could not create)\n");
