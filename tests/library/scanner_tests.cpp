@@ -230,12 +230,13 @@ int main() {
         auto scanResult = kessoku::library::Scan(result.Value());
 
         // The symlink resolves to a file outside the root, so Contains()
-        // should return false, and it should appear in skipped.
+        // should return false, and it should appear in skipped. File reparse
+        // points are skipped before containment is consulted.
         if (symlinkOk) {
             CHECK(!PathContains(scanResult.files, symlinkPath),
                   "file symlink not in results");
             CHECK(SkippedContainsReason(scanResult.skipped, symlinkPath,
-                                        "resolved outside library root"),
+                                        "reparse point (not followed)"),
                   "file symlink in skipped with correct reason");
             DeleteFileW(symlinkPath.c_str());
         } else {
@@ -582,6 +583,54 @@ int main() {
             RemoveDirectoryW(insideJunction.c_str());
         } else {
             printf("SKIP: inside-root junction test (could not create)\n");
+        }
+
+        RemoveTempDir(root);
+    }
+    printf("\n");
+
+    // ================================================================
+    // Test 12: A file symlink inside the root pointing to another file inside
+    // the root must not duplicate the target. Reparse points are skipped
+    // uniformly, so the real file is still found exactly once and the link
+    // is reported as skipped rather than silently listed twice.
+    // ================================================================
+    {
+        std::wstring root = CreateTempDir(L"\\kessoku_scan_test12");
+        if (root.empty()) {
+            fprintf(stderr, "FATAL: Could not create test12 root\n");
+            return 1;
+        }
+
+        std::wstring realFile;
+        CreateFileInDir(root, L"real.flac", &realFile);
+        std::wstring linkFile = root + L"\\alias.flac";
+        const bool linkOk = CreateSymlink(linkFile, realFile);
+
+        auto result = kessoku::core::LibraryRoot::Create(root);
+        if (!result.IsOk()) {
+            fprintf(stderr, "FATAL: LibraryRoot::Create failed: %s\n",
+                    result.GetError().message.data());
+            return 1;
+        }
+
+        auto scanResult = kessoku::library::Scan(result.Value());
+        CHECK(PathContains(scanResult.files, realFile),
+              "real file found with an inside file symlink present");
+
+        if (linkOk) {
+            CHECK(scanResult.files.size() == 1,
+                  "inside file symlink causes no duplicate track");
+            CHECK(!PathContains(scanResult.files, linkFile),
+                  "inside file symlink is not followed");
+            CHECK(SkippedContainsReason(scanResult.skipped,
+                                        std::wstring_view(linkFile),
+                                        "reparse point (not followed)"),
+                  "inside file symlink appears in skipped");
+            DeleteFileW(linkFile.c_str());
+        } else {
+            printf("SKIP: inside file symlink test "
+                   "(requires Dev Mode or elevation)\n");
         }
 
         RemoveTempDir(root);

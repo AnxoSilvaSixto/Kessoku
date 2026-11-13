@@ -103,13 +103,23 @@ void ScanDirectory(
                     ScanDirectory(entry.path(), root, files, skipped);
                 }
             } else if (isFile) {
-                std::wstring ext = entry.path().extension().wstring();
-                if (IsAudioExtension(ext)) {
-                    if (root.Contains(entry.path().wstring())) {
-                        files.push_back(entry.path());
-                    } else {
-                        skipped.push_back({entry.path(),
-                            "resolved outside library root"});
+                // File symlinks are reparse points too. Following one that
+                // targets another file in the library would list the same
+                // track twice, so skip reparse points uniformly.
+                const DWORD attrs = GetFileAttributesW(entry.path().c_str());
+                if (attrs != INVALID_FILE_ATTRIBUTES &&
+                    (attrs & FILE_ATTRIBUTE_REPARSE_POINT)) {
+                    skipped.push_back({entry.path(),
+                        "reparse point (not followed)"});
+                } else {
+                    std::wstring ext = entry.path().extension().wstring();
+                    if (IsAudioExtension(ext)) {
+                        if (root.Contains(entry.path().wstring())) {
+                            files.push_back(entry.path());
+                        } else {
+                            skipped.push_back({entry.path(),
+                                "resolved outside library root"});
+                        }
                     }
                 }
             }
