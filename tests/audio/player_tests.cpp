@@ -1374,6 +1374,43 @@ void RunInvalidInputTests() {
                       "Player::Create rejects a FLAC with no sample count");
     DeleteFileW(unknownLengthFlac.c_str());
 
+    // A corrupt STREAMINFO can claim more 36-bit samples than the uint32_t
+    // frame counter can represent; that must fail before hardware too.
+    const std::wstring overflowFlac = dir + L"\\overflow_total.flac";
+    CHECK(CreateTestFlac(overflowFlac, 44100, 16, 2, 100),
+          "write FLAC for total-sample overflow test");
+    CHECK(PatchFlacTotalSamples(overflowFlac, 0xFFFFFFFFFULL),
+          "patch FLAC total samples above uint32_t");
+    expectCreateError(overflowFlac,
+                      kessoku::core::ErrorCode::AudioInitFailed,
+                      "Player::Create rejects FLAC total samples above 32 bits");
+    DeleteFileW(overflowFlac.c_str());
+
+    // Uppercase extension must select the FLAC parser too, not fall through
+    // to the WAV path.
+    const std::wstring upperGarbage = dir + L"\\GARBAGE.FLAC";
+    {
+        HANDLE hFile = CreateFileW(
+            upperGarbage.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+        bool wrote = false;
+        if (hFile != INVALID_HANDLE_VALUE) {
+            const char bytes[] = "not a flac file";
+            DWORD written = 0;
+            wrote = WriteFile(hFile, bytes, sizeof(bytes) - 1, &written,
+                              nullptr) != 0 &&
+                    written == sizeof(bytes) - 1;
+            CloseHandle(hFile);
+        }
+        CHECK(wrote, "write garbage uppercase .FLAC fixture");
+        if (wrote) {
+            expectCreateError(upperGarbage,
+                              kessoku::core::ErrorCode::AudioInitFailed,
+                              "uppercase .FLAC garbage takes the FLAC path");
+        }
+    }
+    DeleteFileW(upperGarbage.c_str());
+
     RemoveDirectoryW(dir.c_str());
 }
 

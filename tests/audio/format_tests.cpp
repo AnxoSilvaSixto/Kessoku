@@ -238,17 +238,27 @@ std::vector<uint8_t> ReadBytes(const std::filesystem::path& path) {
 // (4 bytes), then the 34-byte payload. The 8-byte packed field at payload
 // offset 10 (file offset 18) holds 20 bits of sample rate, 3 bits of
 // channels-1, 5 bits of bits-per-sample-1, and 36 bits of total samples.
-// Clearing the top 20 bits sets the sample rate to zero while leaving the
-// other fields intact.
-bool PatchFlacSampleRateToZero(const std::filesystem::path& path) {
+// Replacing the top 20 bits changes only the sample rate.
+bool PatchFlacSampleRate(const std::filesystem::path& path,
+                         uint32_t sampleRate) {
     std::vector<uint8_t> bytes = ReadBytes(path);
     if (bytes.size() < 26 || std::memcmp(bytes.data(), "fLaC", 4) != 0 ||
         (bytes[4] & 0x7Fu) != 0 /* STREAMINFO */) {
         return false;
     }
-    bytes[18] = 0;
-    bytes[19] = 0;
-    bytes[20] &= 0x0Fu;
+
+    uint64_t packed = 0;
+    for (size_t i = 0; i < 8; ++i) {
+        packed = (packed << 8) | bytes[18 + i];
+    }
+    constexpr uint64_t kRateMask = 0xFFFFFULL << 44;
+    packed = (packed & ~kRateMask) |
+             ((static_cast<uint64_t>(sampleRate) & 0xFFFFFULL) << 44);
+    for (int i = 7; i >= 0; --i) {
+        bytes[18 + static_cast<size_t>(i)] =
+            static_cast<uint8_t>(packed & 0xFFu);
+        packed >>= 8;
+    }
     return WriteBytes(path, bytes);
 }
 
@@ -500,9 +510,39 @@ void TestFlacParsing(const std::wstring& dir) {
     const std::wstring zeroRatePath = dir + L"\\zero_rate.flac";
     Check(WriteFlac(zeroRatePath, 44100),
           "write FLAC fixture for zero sample-rate patch");
-    Check(PatchFlacSampleRateToZero(zeroRatePath),
+    Check(PatchFlacSampleRate(zeroRatePath, 0),
           "patch FLAC STREAMINFO sample rate to zero");
     ExpectFlacError(zeroRatePath, "FLAC with a zero sample rate is rejected");
+
+    const std::wstring maxRatePath = dir + L"\\max_rate.flac";
+    Check(WriteFlac(maxRatePath, 44100),
+          "write FLAC fixture for max sample-rate patch");
+    Check(PatchFlacSampleRate(maxRatePath, 655350),
+          "patch FLAC STREAMINFO sample rate to 655350");
+    {
+        kessoku::audio::FlacFormat maxFormat{};
+        Check(kessoku::audio::ParseFlacFormat(maxRatePath, maxFormat).empty(),
+              "FLAC at the subset sample-rate maximum parses");
+        Check(maxFormat.sampleRate == 655350,
+              "patched subset maximum sample rate is preserved");
+    }
+
+    // STREAMINFO has a 20-bit sample-rate field; libFLAC treats the full
+    // 1,048,575 Hz range as representable. Playback capability is decided by
+    // exclusive-mode negotiation, not by the metadata parser clamping it.
+    const std::wstring packedMaxRatePath = dir + L"\\packed_max_rate.flac";
+    Check(WriteFlac(packedMaxRatePath, 44100),
+          "write FLAC fixture for packed-max sample-rate patch");
+    Check(PatchFlacSampleRate(packedMaxRatePath, 0xFFFFFu),
+          "patch FLAC STREAMINFO sample rate to the 20-bit maximum");
+    {
+        kessoku::audio::FlacFormat packedFormat{};
+        Check(kessoku::audio::ParseFlacFormat(packedMaxRatePath, packedFormat)
+                  .empty(),
+              "FLAC at the 20-bit sample-rate maximum parses");
+        Check(packedFormat.sampleRate == 0xFFFFFu,
+              "packed maximum sample rate is preserved without clamping");
+    }
 
     const std::wstring truncatedPath = dir + L"\\truncated.flac";
     {
@@ -626,6 +666,61 @@ void TestMetadataMismatches(const std::wstring& dir) {
               std::filesystem::path(hugeFmtWav))
               .IsErr(),
           "oversized fmt WAV metadata is rejected before TagLib");
+
+    // Structural walking must survive leading chunks that are empty or have
+    // an odd payload with the mandatory RIFF pad byte; the fmt chunk is still
+    // found and TagLib can read the file.
+    const std::wstring leadingJunkWav = dir + L"\\leading_junk.wav";
+    {
+        std::vector<uint8_t> bytes = MakeWavHeader();
+        AppendChunk(bytes, "JUNK", {});
+        AppendChunk(bytes, "LIST", {'x', 'y', 'z'});
+        AppendChunk(bytes, "fmt ", MakeFmtPayload(1, 2, 44100, 16));
+        AppendChunk(bytes, "data", std::vector<uint8_t>(16, 0));
+        Check(WriteBytes(leadingJunkWav, bytes),
+              "write WAV with empty and odd-sized leading chunks");
+    }
+    Check(kessoku::library::ReadTrackMetadata(
+              std::filesystem::path(leadingJunkWav))
+              .IsOk(),
+          "WAV with leading junk chunks reads metadata");
+
+    const std::wstring extraFmtWav = dir + L"\\fmt_extra.wav";
+    {
+        std::vector<uint8_t> bytes = MakeWavHeader();
+        AppendChunk(bytes, "fmt ", MakeFmtPayload(1, 2, 44100, 16, 2));
+        AppendChunk(bytes, "data", std::vector<uint8_t>(16, 0));
+        Check(WriteBytes(extraFmtWav, bytes),
+              "write WAV with an 18-byte fmt chunk");
+    }
+    Check(kessoku::library::ReadTrackMetadata(
+              std::filesystem::path(extraFmtWav))
+              .IsOk(),
+          "WAV with an 18-byte fmt chunk reads metadata");
+
+    const std::wstring shortFmtWav = dir + L"\\fmt_short_payload.wav";
+    {
+        std::vector<uint8_t> bytes = MakeWavHeader();
+        AppendTag(bytes, "fmt ");
+        AppendU32(bytes, 16);
+        bytes.resize(bytes.size() + 8, 0); // Only half the declared payload.
+        Check(WriteBytes(shortFmtWav, bytes),
+              "write WAV with a truncated fmt payload for metadata");
+    }
+    Check(kessoku::library::ReadTrackMetadata(
+              std::filesystem::path(shortFmtWav))
+              .IsErr(),
+          "truncated fmt WAV metadata is rejected before TagLib");
+
+    // The pre-TagLib WAV check is extension-based, so it must be just as
+    // strict for .WAV as for .wav.
+    const std::wstring upperBadWav = dir + L"\\BAD.WAV";
+    Check(WriteBytes(upperBadWav, {'n', 'o', 't', ' ', 'w', 'a', 'v', 'e'}),
+          "write garbage uppercase .WAV fixture");
+    Check(kessoku::library::ReadTrackMetadata(
+              std::filesystem::path(upperBadWav))
+              .IsErr(),
+          "uppercase .WAV garbage is rejected before TagLib");
 
     const std::wstring directoryWav = dir + L"\\directory.wav";
     std::error_code metadataDirEc;

@@ -144,6 +144,33 @@ bool WriteWavFile(const std::wstring& path, uint32_t frames) {
     return written == bytes.size();
 }
 
+// A structurally plausible RIFF/WAVE file whose fmt chunk declares more than
+// the 1 MB cap. Metadata pre-validation must reject it without reading or
+// allocating the declared payload, so a malicious library cannot turn startup
+// into an allocation or I/O DoS.
+bool WriteMalformedWavFile(const std::wstring& path) {
+    std::vector<uint8_t> bytes;
+    bytes.insert(bytes.end(), {'R', 'I', 'F', 'F'});
+    AppendU32(bytes, 0);
+    bytes.insert(bytes.end(), {'W', 'A', 'V', 'E'});
+    bytes.insert(bytes.end(), {'f', 'm', 't', ' '});
+    AppendU32(bytes, 1024 * 1024 + 1);
+    AppendU16(bytes, 1);
+    AppendU16(bytes, 2);
+    AppendU32(bytes, 44100);
+    AppendU32(bytes, 176400);
+    AppendU16(bytes, 4);
+    AppendU16(bytes, 16);
+
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"wb") != 0 || file == nullptr) {
+        return false;
+    }
+    const size_t written = fwrite(bytes.data(), 1, bytes.size(), file);
+    fclose(file);
+    return written == bytes.size();
+}
+
 bool WriteFlacFile(const std::wstring& path, uint32_t frames) {
     FLAC__StreamEncoder* encoder = FLAC__stream_encoder_new();
     if (encoder == nullptr) {
@@ -472,6 +499,54 @@ void RunMetadataBenchmark() {
           "timed FLAC decode returns every frame without error");
 }
 
+// Malformed input is not just a correctness path: a library full of hostile
+// headers must not make startup exceed the interactive budget. The old code
+// could let TagLib chase a declared 4 GB fmt chunk; this measures the guarded
+// rejection path across many independent files.
+void RunMalformedMetadataBenchmark() {
+    constexpr int kFiles = 200;
+
+    TempDir dir(CreateUniqueTempDir(L"kessoku_perf_malformed_"));
+    Check(dir.valid(), "create malformed metadata temp directory");
+    if (!dir.valid()) {
+        return;
+    }
+
+    std::vector<std::wstring> paths;
+    paths.reserve(kFiles);
+    for (int i = 0; i < kFiles; ++i) {
+        const std::wstring path =
+            dir.path() + L"\\bad_" + std::to_wstring(i) + L".wav";
+        if (!WriteMalformedWavFile(path)) {
+            Check(false, "create malformed metadata benchmark file");
+            return;
+        }
+        paths.push_back(path);
+    }
+
+    size_t rejected = 0;
+    for (const auto& path : paths) {
+        if (kessoku::library::ReadTrackMetadata(path).IsErr()) {
+            ++rejected;
+        }
+    }
+    Check(rejected == paths.size(),
+          "every malformed benchmark file is rejected");
+
+    size_t timedRejected = 0;
+    Report("reject 200 malformed WAV files", 3, [&] {
+        size_t count = 0;
+        for (const auto& path : paths) {
+            if (kessoku::library::ReadTrackMetadata(path).IsErr()) {
+                ++count;
+            }
+        }
+        timedRejected = count;
+    });
+    Check(timedRejected == paths.size(),
+          "timed malformed metadata reads all fail cleanly");
+}
+
 void RunTransportBenchmark() {
     constexpr int kIterations = 1000000;
 
@@ -529,6 +604,8 @@ int main() {
     RunContainmentBenchmark();
     printf("\n");
     RunMetadataBenchmark();
+    printf("\n");
+    RunMalformedMetadataBenchmark();
     printf("\n");
     RunTransportBenchmark();
     printf("\n");

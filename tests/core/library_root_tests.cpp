@@ -386,6 +386,46 @@ int main() {
     CHECK(libRoot.Contains(forwardFile),
           "forward-slash path inside root is accepted");
 
+    // (y) A candidate that is an ancestor of the root is outside the
+    // boundary, even though its resolved name is a string prefix of the root.
+    CHECK(!libRoot.Contains(tempDir), "ancestor directory of root is rejected");
+    CHECK(!libRoot.Contains(root + L"\\.."),
+          "dot-dot parent of root is rejected");
+
+    // (z) Directories inside the root are inside the boundary; the root with
+    // a trailing separator resolves to the root itself.
+    CHECK(libRoot.Contains(root + L"\\nested"),
+          "directory inside root is accepted");
+    CHECK(libRoot.Contains(root + L"\\"),
+          "root with trailing separator is accepted");
+
+    // (aa) An extended-length local path names the same directory, so
+    // Create() must accept it and normalize the stored root back to the DOS
+    // form rather than keeping the \\?\ prefix. Extended paths do not
+    // normalize separators, so collapse the temp helper's doubled separator
+    // first.
+    const std::wstring canonicalRoot =
+        std::filesystem::weakly_canonical(root).wstring();
+    auto extendedResult =
+        kessoku::core::LibraryRoot::Create(L"\\\\?\\" + canonicalRoot);
+    CHECK(extendedResult.IsOk(),
+          "Create() accepts an extended-length local path");
+    if (extendedResult.IsOk()) {
+        CHECK(extendedResult.Value().path().rfind(L"\\\\?\\", 0) != 0,
+              "extended-length prefix is stripped from the root");
+        CHECK(extendedResult.Value().Contains(rootFile),
+              "extended-length root contains the original file");
+    }
+
+    // (ab) Extended UNC shares are network paths and must be rejected without
+    // attempting a connection.
+    auto extendedUncResult = kessoku::core::LibraryRoot::Create(
+        L"\\\\?\\UNC\\server\\share\\music");
+    CHECK(extendedUncResult.IsErr() &&
+              extendedUncResult.GetError().code ==
+                  kessoku::core::ErrorCode::InvalidPath,
+          "Create() with an extended UNC share returns InvalidPath");
+
     // --- Cleanup ---
     std::error_code cleanupEc;
     std::filesystem::remove_all(root, cleanupEc);

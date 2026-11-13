@@ -136,8 +136,12 @@ void TestRoundTrip() {
 
 void TestFormatTime() {
     CHECK(FormatTrackTime(0, 44100) == L"0:00", "0 frames -> 0:00");
+    CHECK(FormatTrackTime(44099, 44100) == L"0:00",
+          "sub-second frames truncate to 0:00");
     CHECK(FormatTrackTime(44100, 44100) == L"0:01", "1 second -> 0:01");
     CHECK(FormatTrackTime(59 * 44100, 44100) == L"0:59", "59 seconds -> 0:59");
+    CHECK(FormatTrackTime(60 * 44100, 44100) == L"1:00",
+          "exactly 60 seconds -> 1:00");
     CHECK(FormatTrackTime(61 * 44100, 44100) == L"1:01", "61 seconds -> 1:01");
     CHECK(FormatTrackTime(26460000, 44100) == L"10:00",
           "10 min @ 44.1k -> 10:00");
@@ -145,7 +149,11 @@ void TestFormatTime() {
           "10 min @ 192k -> 10:00");
     CHECK(FormatTrackTime(158715900u, 44100) == L"59:59",
           "3599 seconds -> 59:59");
+    CHECK(FormatTrackTime(158760000u, 44100) == L"60:00",
+          "3600 seconds -> 60:00");
     CHECK(FormatTrackTime(12345, 0) == L"0:00", "rate 0 -> 0:00, no divide");
+    CHECK(FormatTrackTime(0xFFFFFFFFu, 44100) == L"1623:11",
+          "max frames @ 44.1k -> 1623:11");
     CHECK(FormatTrackTime(0xFFFFFFFFu, 1) == L"71582788:15",
           "max frames at 1 Hz does not overflow");
 }
