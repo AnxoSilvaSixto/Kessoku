@@ -4,6 +4,12 @@ A minimal, native Windows 11 music player. Browse, play, pause, and seek FLAC
 and WAV files from one user-selected library folder, played back bit-perfectly
 through WASAPI Exclusive Mode. Nothing else, on purpose.
 
+## Downloads
+
+No packaged builds are published yet. The installer/distribution format is
+still undecided, so build from source with the steps below. This section will
+be updated when binaries are available.
+
 ## Requirements
 
 - Windows 11 (x64)
@@ -46,16 +52,24 @@ example, Debug and Release) contend for the same endpoint and one will fail.
 
 `format_tests` feeds malformed, truncated, and deterministically random
 WAV/FLAC/metadata inputs through the parsers and checks that content/extension
-mismatches fail cleanly instead of reporting empty metadata.
+mismatches fail cleanly instead of reporting empty metadata. It also covers
+boundary conditions such as case-sensitive RIFF chunk IDs, zero-size chunks,
+the exact 1 MB `fmt` allocation cap, and FLAC STREAMINFO sample-rate limits.
+
+`player_tests` includes device-free rejection checks for malformed input,
+unsupported bit depths and channel layouts, unknown FLAC sample counts, and
+WAV files with no data chunk, so those cases fail before touching audio
+hardware.
 
 `performance_tests` times complete user-visible workloads: scanning 2,000
-files, scanning and reading metadata for a 500-track library at launch, 2,000
+files, scanning a mixed 2,000-file library that contains only 500 audio
+tracks, scanning and reading metadata for a 500-track library at launch, 2,000
 containment checks, 100 WAV and FLAC metadata reads, opening and decoding a
-10-second FLAC, transport conversions, time formatting, and UTF-8 path
-round-trips. Each scenario is warmed up, measured three times, and held to the
-400 ms Doherty Threshold. AddressSanitizer builds execute the same workloads
-but do not enforce wall-clock budgets, because sanitizer instrumentation
-changes timing rather than application behavior.
+10-second FLAC, rejecting 200 malformed WAV files, transport conversions, time
+formatting, and UTF-8 path round-trips. Each scenario is warmed up, measured
+three times, and held to the 400 ms Doherty Threshold. AddressSanitizer builds
+execute the same workloads but do not enforce wall-clock budgets, because
+sanitizer instrumentation changes timing rather than application behavior.
 
 ### Presets
 
