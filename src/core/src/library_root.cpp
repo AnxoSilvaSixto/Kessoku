@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstddef>
+#include <filesystem>
 #include <string>
 #include <string_view>
 
@@ -112,6 +113,16 @@ bool IsNetworkPath(std::wstring_view path) {
 } // namespace
 
 Result<LibraryRoot> LibraryRoot::Create(std::wstring_view selectedPath) {
+    // The boundary must be anchored to an absolute location. A relative
+    // selection would make the root depend on the process working directory,
+    // which the app never exposes as a stable library location.
+    const std::filesystem::path selected{std::wstring(selectedPath)};
+    if (!selected.is_absolute()) {
+        return kessoku::core::Result<LibraryRoot>::Err(
+            ErrorCode::InvalidPath,
+            "Library path must be absolute");
+    }
+
     if (IsNetworkPath(selectedPath)) {
         return kessoku::core::Result<LibraryRoot>::Err(
             ErrorCode::InvalidPath,
