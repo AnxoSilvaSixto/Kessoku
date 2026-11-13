@@ -303,6 +303,12 @@ int main() {
     auto emptyResult = kessoku::core::LibraryRoot::Create(L"");
     CHECK(emptyResult.IsErr(), "Create() with an empty path returns Err");
 
+    // Relative paths are not a usable library root: the app needs an absolute
+    // boundary that does not depend on the process working directory.
+    auto relativeResult = kessoku::core::LibraryRoot::Create(
+        L"kessoku_relative_root_that_does_not_exist");
+    CHECK(relativeResult.IsErr(), "Create() with a relative path returns Err");
+
     // (q) A file is not a library root. CreateFileW accepts files with
     // FILE_FLAG_BACKUP_SEMANTICS, so Create() must explicitly reject them.
     auto fileRootResult = kessoku::core::LibraryRoot::Create(rootFile);

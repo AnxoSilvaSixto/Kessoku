@@ -310,6 +310,74 @@ void RunScanBenchmark() {
           "timed scan still returns every audio file");
 }
 
+// Real libraries are rarely pure audio: cover art, logs, cue sheets, and
+// other files sit next to the tracks. Discovery must filter them without
+// letting their count dominate the interactive budget or leak into results.
+void RunMixedLibraryBenchmark() {
+    constexpr int kDirectories = 5;
+    constexpr int kAudioPerDirectory = 100;  // 500 tracks.
+    constexpr int kOtherPerDirectory = 300;  // 1,500 non-audio files.
+    constexpr int kExpectedAudio = kDirectories * kAudioPerDirectory;
+    constexpr const wchar_t* kOtherExtensions[] = {
+        L".jpg", L".png", L".txt", L".log", L".cue", L".m3u", L".nfo", L".tmp"};
+
+    TempDir dir(CreateUniqueTempDir(L"kessoku_perf_mixed_"));
+    Check(dir.valid(), "create mixed-library temp directory");
+    if (!dir.valid()) {
+        return;
+    }
+
+    for (int d = 0; d < kDirectories; ++d) {
+        const std::wstring dirName = L"album_" + std::to_wstring(d);
+        if (!CreateSubdir(dir.path(), dirName)) {
+            Check(false, "create mixed-library album directory");
+            return;
+        }
+        const std::wstring albumDir = dir.path() + L"\\" + dirName;
+
+        for (int f = 0; f < kAudioPerDirectory; ++f) {
+            const std::wstring name =
+                L"track_" + std::to_wstring(f) + L".wav";
+            if (!CreateFileInDir(albumDir, name)) {
+                Check(false, "create mixed-library audio file");
+                return;
+            }
+        }
+        for (int f = 0; f < kOtherPerDirectory; ++f) {
+            const std::wstring name =
+                L"extra_" + std::to_wstring(f) +
+                kOtherExtensions[f % (sizeof(kOtherExtensions) /
+                                      sizeof(kOtherExtensions[0]))];
+            if (!CreateFileInDir(albumDir, name)) {
+                Check(false, "create mixed-library non-audio file");
+                return;
+            }
+        }
+    }
+
+    auto rootResult = kessoku::core::LibraryRoot::Create(dir.path());
+    Check(rootResult.IsOk(), "create LibraryRoot for mixed library");
+    if (!rootResult.IsOk()) {
+        return;
+    }
+    const kessoku::core::LibraryRoot& root = rootResult.Value();
+
+    const auto initial = kessoku::library::Scan(root);
+    Check(initial.files.size() == static_cast<size_t>(kExpectedAudio),
+          "mixed-library scan keeps only audio files");
+    Check(initial.skipped.empty(), "mixed-library scan skips nothing");
+    if (initial.files.size() != static_cast<size_t>(kExpectedAudio)) {
+        return;
+    }
+
+    size_t observed = 0;
+    Report("scan 500 audio + 1,500 other files", 3, [&] {
+        observed = kessoku::library::Scan(root).files.size();
+    });
+    Check(observed == static_cast<size_t>(kExpectedAudio),
+          "timed mixed-library scan returns only audio files");
+}
+
 // Mirrors the real startup path in main.cpp: scan the library root, then read
 // metadata for every discovered track. This is the operation a user waits on
 // when opening a library, so it gets the Doherty budget as a whole.
@@ -598,6 +666,8 @@ int main() {
 #endif
 
     RunScanBenchmark();
+    printf("\n");
+    RunMixedLibraryBenchmark();
     printf("\n");
     RunLaunchBenchmark();
     printf("\n");
