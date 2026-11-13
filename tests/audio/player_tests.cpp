@@ -98,6 +98,27 @@ bool CreateTestWav(std::wstring_view path, uint32_t sampleRate,
     return true;
 }
 
+// Overwrite `size` bytes at an absolute file offset. Used to rewrite chunk
+// IDs in a generated fixture without rebuilding the whole file.
+bool OverwriteFileBytes(std::wstring_view path, uint64_t offset,
+                        const void* data, size_t size) {
+    HANDLE hFile = CreateFileW(std::wstring(path).c_str(),
+                               GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    LARGE_INTEGER pos{};
+    pos.QuadPart = static_cast<LONGLONG>(offset);
+    bool ok = SetFilePointerEx(hFile, pos, nullptr, FILE_BEGIN) != 0;
+    DWORD written = 0;
+    ok = ok && WriteFile(hFile, data, static_cast<DWORD>(size), &written,
+                         nullptr) != 0 &&
+         written == size;
+    CloseHandle(hFile);
+    return ok;
+}
+
 // Create a temp WAV file and return its path.
 std::wstring CreateTempWav(std::wstring_view prefix, uint32_t sampleRate,
                            uint16_t bitsPerSample, uint16_t channels,
@@ -725,12 +746,14 @@ void RunComApartmentOwnershipTest() {
 // a clean EOS while currentFrame_ < totalFrames_; treating that as "more data
 // coming" leaves the render loop writing silence in Playing forever.
 //
-// Patch the 36-bit total-samples field in STREAMINFO. Layout: "fLaC",
+// Patch selected bits in the packed STREAMINFO field. Layout: "fLaC",
 // block header (1 byte type + 3-byte length), then STREAMINFO. The packed
 // sample-rate/channels/depth/total-samples field starts 10 bytes into
-// STREAMINFO, so total_samples occupies file offsets 18..25 (big-endian,
-// low 36 bits).
-bool PatchFlacTotalSamples(std::wstring_view path, uint64_t totalSamples) {
+// STREAMINFO, so it occupies file offsets 18..25 (big-endian) and splits
+// into 20 bits sample rate, 3 bits channels-1, 5 bits depth-1, 36 bits
+// total samples.
+bool PatchFlacPackedField(std::wstring_view path, uint64_t mask,
+                          uint64_t value) {
     HANDLE hFile = CreateFileW(path.data(), GENERIC_READ | GENERIC_WRITE, 0,
                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
                                nullptr);
@@ -739,7 +762,6 @@ bool PatchFlacTotalSamples(std::wstring_view path, uint64_t totalSamples) {
     }
 
     constexpr DWORD kPackedFieldOffset = 18;
-    constexpr uint64_t kTotalSamplesMask = 0xFFFFFFFFFULL; // low 36 bits
 
     uint8_t header[kPackedFieldOffset + 8]{};
     DWORD bytesRead = 0;
@@ -753,8 +775,7 @@ bool PatchFlacTotalSamples(std::wstring_view path, uint64_t totalSamples) {
             packed = (packed << uint64_t{8}) |
                      static_cast<uint64_t>(header[kPackedFieldOffset + i]);
         }
-        packed = (packed & ~kTotalSamplesMask) |
-                 (totalSamples & kTotalSamplesMask);
+        packed = (packed & ~mask) | (value & mask);
 
         uint8_t patched[8]{};
         for (int i = 7; i >= 0; --i) {
@@ -770,6 +791,21 @@ bool PatchFlacTotalSamples(std::wstring_view path, uint64_t totalSamples) {
 
     CloseHandle(hFile);
     return ok;
+}
+
+bool PatchFlacTotalSamples(std::wstring_view path, uint64_t totalSamples) {
+    return PatchFlacPackedField(path, 0xFFFFFFFFFULL /* low 36 bits */,
+                                totalSamples);
+}
+
+// STREAMINFO stores depth-1 in bits 36..40 of the packed field.
+bool PatchFlacBitsPerSample(std::wstring_view path, uint32_t bitsPerSample) {
+    if (bitsPerSample < 1 || bitsPerSample > 32) {
+        return false;
+    }
+    return PatchFlacPackedField(
+        path, uint64_t{0x1F} << 36,
+        static_cast<uint64_t>(bitsPerSample - 1) << 36);
 }
 
 void RunPrematureFlacEndTest() {
@@ -1363,6 +1399,42 @@ void RunInvalidInputTests() {
                       kessoku::core::ErrorCode::FormatNotSupported,
                       "Player::Create rejects a 12-bit FLAC");
     DeleteFileW(depthFlac.c_str());
+
+    // FLAC itself permits 4-bit samples, but there is no 4-bit PCM wire
+    // container; Player must reject it before device negotiation. libFLAC's
+    // encoder refuses 4-bit output under its streamable-subset default, so
+    // patch STREAMINFO on a valid file instead.
+    const std::wstring depth4Flac = dir + L"\\depth4.flac";
+    CHECK(CreateTestFlac(depth4Flac, 44100, 16, 1, 100),
+          "write FLAC for the 4-bit depth patch");
+    CHECK(PatchFlacBitsPerSample(depth4Flac, 4),
+          "patch FLAC STREAMINFO to 4 bits per sample");
+    expectCreateError(depth4Flac,
+                      kessoku::core::ErrorCode::FormatNotSupported,
+                      "Player::Create rejects a 4-bit FLAC");
+    DeleteFileW(depth4Flac.c_str());
+
+    // More than eight channels is outside the exclusive-mode PCM layout
+    // Player builds, so it is a format error rather than a device probe.
+    const std::wstring nineChannelWav = dir + L"\\channels9.wav";
+    CHECK(CreateTestWav(nineChannelWav, 44100, 16, 9, 0),
+          "write 9-channel WAV");
+    expectCreateError(nineChannelWav,
+                      kessoku::core::ErrorCode::FormatNotSupported,
+                      "Player::Create rejects a 9-channel WAV");
+    DeleteFileW(nineChannelWav.c_str());
+
+    // A structurally valid fmt chunk with no data chunk cannot play; the
+    // data-chunk lookup fails before hardware is opened.
+    const std::wstring noDataWav = dir + L"\\no_data.wav";
+    CHECK(CreateTestWav(noDataWav, 44100, 16, 2, 0),
+          "write WAV fixture for the missing data chunk");
+    CHECK(OverwriteFileBytes(noDataWav, 36, "JUNK", 4),
+          "relabel the empty data chunk as JUNK");
+    expectCreateError(noDataWav,
+                      kessoku::core::ErrorCode::AudioInitFailed,
+                      "Player::Create rejects a WAV without a data chunk");
+    DeleteFileW(noDataWav.c_str());
 
     // A FLAC whose STREAMINFO has no total sample count cannot be played
     // (position/duration would be unknown), so it fails before hardware.

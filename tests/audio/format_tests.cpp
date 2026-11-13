@@ -336,6 +336,81 @@ void TestWavParsing(const std::wstring& dir) {
               "WAV uses the first fmt chunk");
     }
 
+    // RIFF chunk IDs are case-sensitive. An uppercase FMT chunk is not a
+    // format chunk and must not be decoded as one.
+    const std::wstring upperFmtOnlyPath = dir + L"\\upper_fmt_only.wav";
+    {
+        std::vector<uint8_t> bytes = MakeWavHeader();
+        AppendChunk(bytes, "FMT ", MakeFmtPayload(1, 1, 48000, 24));
+        AppendChunk(bytes, "data", std::vector<uint8_t>(8, 0));
+        Check(WriteBytes(upperFmtOnlyPath, bytes),
+              "write WAV with only an uppercase FMT chunk");
+    }
+    ExpectWavError(upperFmtOnlyPath,
+                   "uppercase FMT chunk is not accepted as fmt");
+
+    const std::wstring upperThenLowerFmtPath =
+        dir + L"\\upper_then_lower_fmt.wav";
+    {
+        std::vector<uint8_t> bytes = MakeWavHeader();
+        AppendChunk(bytes, "FMT ", MakeFmtPayload(1, 1, 48000, 24));
+        AppendChunk(bytes, "fmt ", MakeFmtPayload(1, 2, 44100, 16));
+        AppendChunk(bytes, "data", std::vector<uint8_t>(8, 0));
+        Check(WriteBytes(upperThenLowerFmtPath, bytes),
+              "write WAV with uppercase FMT then a real fmt chunk");
+    }
+    {
+        kessoku::audio::WavFormat realFmt{};
+        Check(ParseWav(upperThenLowerFmtPath, realFmt).empty(),
+              "uppercase FMT chunk is skipped by its declared size");
+        Check(realFmt.sampleRate == 44100 &&
+                  realFmt.channelCount == 2 &&
+                  realFmt.bitsPerSample == 16,
+              "WAV uses the lowercase fmt chunk after uppercase FMT");
+    }
+
+    // A zero-size leading chunk has no payload and no pad byte; the parser
+    // must advance to the next chunk instead of stalling or rejecting.
+    const std::wstring emptyChunkPath = dir + L"\\empty_chunk.wav";
+    {
+        std::vector<uint8_t> bytes = MakeWavHeader();
+        AppendChunk(bytes, "JUNK", {});
+        AppendChunk(bytes, "fmt ", MakeFmtPayload(1, 2, 44100, 16));
+        AppendChunk(bytes, "data", std::vector<uint8_t>(8, 0));
+        Check(WriteBytes(emptyChunkPath, bytes),
+              "write WAV with a zero-size leading chunk");
+    }
+    {
+        kessoku::audio::WavFormat afterEmpty{};
+        Check(ParseWav(emptyChunkPath, afterEmpty).empty(),
+              "WAV with a zero-size leading chunk parses");
+        Check(afterEmpty.sampleRate == 44100 &&
+                  afterEmpty.channelCount == 2,
+              "fmt chunk after a zero-size chunk is decoded");
+    }
+
+    // The 1 MB allocation cap is inclusive: exactly 1 MB is still read and
+    // parsed, only a larger declaration is refused.
+    const std::wstring fmtAtCapPath = dir + L"\\fmt_at_cap.wav";
+    {
+        std::vector<uint8_t> bigFmt = MakeFmtPayload(1, 2, 48000, 24);
+        bigFmt.resize(1024 * 1024, 0);
+        std::vector<uint8_t> bytes = MakeWavHeader();
+        AppendChunk(bytes, "fmt ", bigFmt);
+        AppendChunk(bytes, "data", std::vector<uint8_t>(8, 0));
+        Check(WriteBytes(fmtAtCapPath, bytes),
+              "write WAV with a 1 MB fmt chunk");
+    }
+    {
+        kessoku::audio::WavFormat atCap{};
+        Check(ParseWav(fmtAtCapPath, atCap).empty(),
+              "WAV fmt chunk at the exact 1 MB cap parses");
+        Check(atCap.sampleRate == 48000 &&
+                  atCap.channelCount == 2 &&
+                  atCap.bitsPerSample == 24,
+              "fmt fields at the cap boundary are decoded");
+    }
+
     const std::wstring emptyPath = dir + L"\\empty.wav";
     Check(WriteBytes(emptyPath, {}), "write empty WAV fixture");
     ExpectWavError(emptyPath, "empty WAV is rejected");
