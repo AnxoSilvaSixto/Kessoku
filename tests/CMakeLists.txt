@@ -169,3 +169,25 @@ add_test(NAME performance_tests COMMAND performance_tests)
 set_tests_properties(performance_tests PROPERTIES RUN_SERIAL TRUE)
 
 kessoku_copy_asan_runtime(performance_tests)
+
+# Skips are environment conditions - no exclusive-mode device, symlink tests
+# that need elevation or Developer Mode - not passes. Report them as skipped
+# so "8/8 passed" cannot hide a suite that never ran; before this, a busy or
+# over-rejecting audio path exited 0 and ctest printed Passed.
+#
+# KESSOKU_STRICT_TESTS=ON turns every skip into a failure. Use it for a
+# release gate, where a skipped lifecycle test is not evidence of anything.
+option(KESSOKU_STRICT_TESTS
+    "Fail any test that reports SKIP instead of reporting it as skipped" OFF)
+
+foreach(_suite IN ITEMS
+        library_root_tests utf8_tests scanner_tests metadata_tests
+        player_tests transport_position_tests format_tests performance_tests)
+    if(KESSOKU_STRICT_TESTS)
+        set_tests_properties(${_suite} PROPERTIES
+            FAIL_REGULAR_EXPRESSION "SKIP:")
+    else()
+        set_tests_properties(${_suite} PROPERTIES
+            SKIP_REGULAR_EXPRESSION "SKIP:")
+    endif()
+endforeach()

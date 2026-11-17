@@ -306,12 +306,21 @@ private:
             return;
         }
 
+        // Stop any active Player first: releases its exclusive stream and
+        // joins its render thread before the new Create() acquires the
+        // device. Everything here runs on the UI thread, the same thread
+        // that created the old Player, so Stop() satisfies the
+        // single-calling-thread contract.
+        StopTrack();
+
         // Play-time containment: the path resolved inside the library root
         // at scan time, but the filesystem may have changed since (a
         // junction or symlink swapped in after the scan resolves outside).
-        // Re-resolve immediately before opening. Contains() fails closed on
-        // missing files too, so the message must not claim which case
-        // refused the track.
+        // Re-resolve as late as possible, after StopTrack's thread join and
+        // immediately before Player::Create opens the file. Contains() fails
+        // closed on missing files too, so the message must not claim which
+        // case refused the track. This narrows the check-then-open window;
+        // it does not bind the canonical handle to the parser.
         if (!m_libraryRoot.has_value() ||
             !m_libraryRoot->Contains(m_entries[index].first.native())) {
             ::MessageBoxW(m_hWnd, L"The selected track cannot be played.",
@@ -319,13 +328,6 @@ private:
             m_statusLabel.SetWindowTextW(L"Could not play selected track.");
             return;
         }
-
-        // Stop any active Player first: releases its exclusive stream and
-        // joins its render thread before the new Create() acquires the
-        // device. Everything here runs on the UI thread, the same thread
-        // that created the old Player, so Stop() satisfies the
-        // single-calling-thread contract.
-        StopTrack();
 
         auto result = kessoku::audio::Player::Create(m_entries[index].first.native());
         if (result.IsErr()) {
@@ -645,7 +647,8 @@ void RunScanAndPost(HWND hWnd, const std::wstring& folderPath)
             data->tracks.reserve(scanResult.files.size());
 
             for (const auto& filePath : scanResult.files) {
-                auto metaResult = kessoku::library::ReadTrackMetadata(filePath);
+                auto metaResult =
+                    kessoku::library::ReadTrackMetadata(root, filePath);
                 if (metaResult.IsOk()) {
                     data->tracks.emplace_back(filePath, metaResult.Value());
                 } else {

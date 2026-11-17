@@ -93,24 +93,26 @@ void ScanDirectory(
             bool isFile = entry.is_regular_file(entryEc);
             if (entryEc) {
                 skipped.push_back({entry.path(), DescribeErrorCode(entryEc)});
-            } else if (isDir) {
-                DWORD attrs = GetFileAttributesW(entry.path().c_str());
-                if (attrs != INVALID_FILE_ATTRIBUTES &&
-                    (attrs & FILE_ATTRIBUTE_REPARSE_POINT)) {
-                    skipped.push_back({entry.path(),
-                        "reparse point (not followed)"});
-                } else {
-                    ScanDirectory(entry.path(), root, files, skipped);
-                }
-            } else if (isFile) {
-                // File symlinks are reparse points too. Following one that
-                // targets another file in the library would list the same
-                // track twice, so skip reparse points uniformly.
+            } else if (isDir || isFile) {
+                // GetFileAttributesW can fail even though the directory
+                // entry itself was readable. Treat an unreadable attribute
+                // as a skip: the earlier fail-open test treated it as "not a
+                // reparse point" and recursed, so enumeration could leave
+                // the root, contradicting the rule that every runtime path
+                // is checked before any file operation.
                 const DWORD attrs = GetFileAttributesW(entry.path().c_str());
-                if (attrs != INVALID_FILE_ATTRIBUTES &&
-                    (attrs & FILE_ATTRIBUTE_REPARSE_POINT)) {
+                if (attrs == INVALID_FILE_ATTRIBUTES) {
+                    skipped.push_back({entry.path(),
+                        core::WideToUtf8(GetErrorDescription(GetLastError()))});
+                } else if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) {
+                    // Directories: a junction or symlink may target another
+                    // location entirely. Files: following one that targets
+                    // another file in the library would list the same track
+                    // twice. Skip reparse points uniformly.
                     skipped.push_back({entry.path(),
                         "reparse point (not followed)"});
+                } else if (isDir) {
+                    ScanDirectory(entry.path(), root, files, skipped);
                 } else {
                     std::wstring ext = entry.path().extension().wstring();
                     if (IsAudioExtension(ext)) {

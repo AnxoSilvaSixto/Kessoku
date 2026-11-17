@@ -12,6 +12,11 @@ enum class ErrorCode {
     InvalidPath,
     DeviceNotFound,
     FormatNotSupported,
+    // The device rejected a format the player itself considers valid. Kept
+    // distinct from FormatNotSupported so a test can tell "this endpoint
+    // cannot do it" (environmental, may skip) apart from "this file is not
+    // playable" (a product result that must still assert).
+    DeviceFormatRejected,
     ExclusiveModeUnavailable,
     AudioInitFailed,
     UnknownError

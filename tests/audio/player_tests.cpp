@@ -36,14 +36,17 @@ void Check(bool condition, const char* testName, const char* desc,
 // True when Player::Create failed for an environment reason (no default
 // device, device rejects this format in exclusive mode, or exclusive mode is
 // busy/disallowed) rather than a product regression. Callers print an honest
-// SKIP instead of failing the test. Any other code (notably AudioInitFailed)
-// is a genuine failure and must still hit CHECK. The code distinction comes
-// from player.cpp: DeviceNotFound for enumerator/endpoint failures,
-// FormatNotSupported for IsFormatSupported rejection, ExclusiveModeUnavailable
-// via HResultToErrorCode for EXCLUSIVE_MODE_NOT_ALLOWED/DEVICE_IN_USE.
+// SKIP instead of failing the test. Any other code (notably AudioInitFailed
+// and FormatNotSupported) is a genuine failure and must still hit CHECK. The
+// code distinction comes from player.cpp: DeviceNotFound for enumerator/
+// endpoint failures, DeviceFormatRejected for IsFormatSupported rejection,
+// ExclusiveModeUnavailable via HResultToErrorCode for
+// EXCLUSIVE_MODE_NOT_ALLOWED/DEVICE_IN_USE. First-party format validation
+// keeps returning FormatNotSupported, so an over-rejecting regression fails
+// the suite instead of silently skipping it.
 bool IsEnvironmentSkipCode(kessoku::core::ErrorCode code) {
     return code == kessoku::core::ErrorCode::DeviceNotFound ||
-           code == kessoku::core::ErrorCode::FormatNotSupported ||
+           code == kessoku::core::ErrorCode::DeviceFormatRejected ||
            code == kessoku::core::ErrorCode::ExclusiveModeUnavailable;
 }
 

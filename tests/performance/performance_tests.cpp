@@ -428,7 +428,7 @@ void RunLaunchBenchmark() {
         const auto scan = kessoku::library::Scan(root);
         size_t readable = 0;
         for (const auto& file : scan.files) {
-            if (kessoku::library::ReadTrackMetadata(file).IsOk()) {
+            if (kessoku::library::ReadTrackMetadata(root, file).IsOk()) {
                 ++readable;
             }
         }

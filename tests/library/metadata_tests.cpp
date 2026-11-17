@@ -810,6 +810,58 @@ int main() {
     }
     printf("\n");
 
+    // ================================================================
+    // Test 15: The LibraryRoot overload re-checks containment at open time
+    // ================================================================
+    {
+        std::wstring rootDir = CreateTempDir(L"\\kessoku_meta_root_test");
+        std::wstring outsideDir =
+            CreateTempDir(L"\\kessoku_meta_outside_test");
+        Check(!rootDir.empty() && !outsideDir.empty(),
+              "containment test directories created");
+
+        if (!rootDir.empty() && !outsideDir.empty()) {
+            std::wstring insidePath =
+                CreateMinimalWav(rootDir, L"inside.wav");
+            std::wstring outsidePath =
+                CreateMinimalWav(outsideDir, L"outside.wav");
+            Check(!insidePath.empty() && !outsidePath.empty(),
+                  "containment test fixtures created");
+
+            auto rootResult =
+                kessoku::core::LibraryRoot::Create(rootDir);
+            Check(rootResult.IsOk(), "LibraryRoot created for metadata test");
+
+            if (rootResult.IsOk() && !insidePath.empty() &&
+                !outsidePath.empty()) {
+                const auto& libRoot = rootResult.Value();
+
+                auto inside = kessoku::library::ReadTrackMetadata(
+                    libRoot, std::filesystem::path(insidePath));
+                CHECK(inside.IsOk(),
+                      "root-checked metadata read accepts an inside file");
+
+                auto outside = kessoku::library::ReadTrackMetadata(
+                    libRoot, std::filesystem::path(outsidePath));
+                Check(outside.IsErr() &&
+                          outside.GetError().code ==
+                              kessoku::core::ErrorCode::InvalidPath,
+                      "root-checked metadata read rejects an outside file");
+
+                auto missing = kessoku::library::ReadTrackMetadata(
+                    libRoot,
+                    std::filesystem::path(rootDir + L"\\missing.wav"));
+                CHECK(missing.IsErr(),
+                      "root-checked metadata read fails closed on missing "
+                      "files");
+            }
+        }
+
+        RemoveTempDir(rootDir);
+        RemoveTempDir(outsideDir);
+    }
+    printf("\n");
+
     std::wprintf(L"=== Results: %d failures ===\n", gFailures);
     RemoveTempDir(root);
     return gFailures;

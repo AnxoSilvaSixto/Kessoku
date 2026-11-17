@@ -89,21 +89,34 @@ bool StringStartsWithOrdinalIAscii(std::wstring_view haystack,
 }
 
 // Network shares are outside this app's local-only scope. UNC roots
-// (\\server\share) and their extended form (\\?\UNC\server\share) must be
-// rejected before they can be normalized into a path the scanner would
-// silently fail to walk.
+// (\\server\share) and their extended forms (\\?\UNC\server\share and
+// \??\UNC\server\share) must be rejected before they can be normalized into
+// a path the scanner would silently fail to walk. Windows accepts both
+// separators, so forward-slash spellings are normalized first; otherwise
+// //server/share would reach CreateFileW and perform network I/O before the
+// post-resolution check.
 bool IsNetworkPath(std::wstring_view path) {
-    constexpr std::wstring_view kExtendedUnc = LR"(\\?\UNC\)";
-    if (StringStartsWithOrdinalIAscii(path, kExtendedUnc)) {
+    std::wstring normalized(path);
+    for (wchar_t& c : normalized) {
+        if (c == L'/') {
+            c = L'\\';
+        }
+    }
+    const std::wstring_view p(normalized);
+
+    if (StringStartsWithOrdinalIAscii(p, LR"(\\?\UNC\)") ||
+        StringStartsWithOrdinalIAscii(p, LR"(\??\UNC\)")) {
         return true;
     }
 
-    if (path.size() < 2 || path[0] != L'\\' || path[1] != L'\\') {
+    if (p.size() < 2 || p[0] != L'\\' || p[1] != L'\\') {
         return false;
     }
 
-    // \\?\C:\... is a local extended-length path, not a share.
-    if (path.size() >= 4 && path[2] == L'?' && path[3] == L'\\') {
+    // \\?\C:\... and \\.\... are local extended-length or device paths,
+    // not shares.
+    if (p.size() >= 4 && (p[2] == L'?' || p[2] == L'.') &&
+        p[3] == L'\\') {
         return false;
     }
 

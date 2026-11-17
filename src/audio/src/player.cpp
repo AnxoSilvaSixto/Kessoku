@@ -23,7 +23,7 @@ namespace {
 kessoku::core::ErrorCode HResultToErrorCode(HRESULT hr) {
     switch (hr) {
         case AUDCLNT_E_UNSUPPORTED_FORMAT:
-            return kessoku::core::ErrorCode::FormatNotSupported;
+            return kessoku::core::ErrorCode::DeviceFormatRejected;
         case AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED:
         case AUDCLNT_E_DEVICE_IN_USE:
             return kessoku::core::ErrorCode::ExclusiveModeUnavailable;
@@ -116,81 +116,6 @@ WAVEFORMATEXTENSIBLE BuildWavExtensible(const kessoku::audio::WavFormat& fmt) {
     return wfx;
 }
 
-// Find the 'data' chunk in a WAV file and return its offset and size.
-// Also rejects a header overstating its data: the declared data range
-// must fit inside the actual file, otherwise the file is truncated and
-// this returns false so Create() fails cleanly before any audio setup.
-bool FindDataChunk(const std::wstring& path, uint64_t& outOffset, uint64_t& outSize) {
-    HANDLE hFile = CreateFileW(
-        path.c_str(), GENERIC_READ, FILE_SHARE_READ,
-        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hFile == INVALID_HANDLE_VALUE) return false;
-
-    // Read and validate RIFF header
-    char riff[12]{};
-    DWORD bytesRead = 0;
-    if (!ReadFile(hFile, riff, 12, &bytesRead, nullptr) || bytesRead < 12) {
-        CloseHandle(hFile);
-        return false;
-    }
-    if (std::memcmp(riff, "RIFF", 4) != 0 ||
-        std::memcmp(riff + 8, "WAVE", 4) != 0) {
-        CloseHandle(hFile);
-        return false;
-    }
-
-    // Scan chunks. `pos` tracks the chunk header offset; the file read
-    // cursor advances past id+size on each read, so skipping a chunk
-    // means header (8 bytes) + payload (+1 pad byte when odd).
-    LARGE_INTEGER pos;
-    pos.QuadPart = 12; // Skip RIFF header
-    SetFilePointerEx(hFile, pos, nullptr, FILE_BEGIN);
-
-    while (true) {
-        char chunkId[4]{};
-        uint32_t chunkSize = 0;
-
-        if (!ReadFile(hFile, chunkId, 4, &bytesRead, nullptr) || bytesRead < 4) {
-            CloseHandle(hFile);
-            return false;
-        }
-        if (!ReadFile(hFile, &chunkSize, 4, &bytesRead, nullptr) || bytesRead < 4) {
-            CloseHandle(hFile);
-            return false;
-        }
-
-        if (std::memcmp(chunkId, "data", 4) == 0) {
-            // The declared data range must fit inside the actual file.
-            // A header overstating its data means a truncated file; reject
-            // it here (same open handle, no extra opens) so Create() fails
-            // cleanly. Reads past real EOF return success with 0 bytes, so
-            // this cannot be detected reliably at playback time.
-            const uint64_t dataEnd =
-                static_cast<uint64_t>(pos.QuadPart + 8) + chunkSize;
-            LARGE_INTEGER fileSize{};
-            if (!GetFileSizeEx(hFile, &fileSize) ||
-                dataEnd > static_cast<uint64_t>(fileSize.QuadPart)) {
-                CloseHandle(hFile);
-                return false;
-            }
-            outOffset = static_cast<uint64_t>(pos.QuadPart + 8);
-            outSize = chunkSize;
-            CloseHandle(hFile);
-            return true;
-        }
-
-        // Skip chunk payload (align to 2 bytes). Widen before adding:
-        // chunkSize is uint32_t, so 8 + chunkSize would wrap for a bogus
-        // size near UINT32_MAX and misalign every following chunk header.
-        pos.QuadPart += static_cast<LONGLONG>(8) +
-                        static_cast<LONGLONG>(chunkSize);
-        if (chunkSize % 2 != 0) {
-            pos.QuadPart += 1;
-        }
-        SetFilePointerEx(hFile, pos, nullptr, FILE_BEGIN);
-    }
-}
-
 // Case-insensitive ".flac" extension check.
 // Takes a view because Create() receives one; the view may not be
 // NUL-terminated, so compare character by character.
@@ -271,58 +196,36 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
             flacFormat.sampleRate * fileFormat.blockAlign;
         totalFrames = static_cast<uint32_t>(flacFormat.totalSamples);
     } else {
-        std::string parseError =
-            ParseWavFormat(std::wstring(wavPath), fileFormat);
-        if (!parseError.empty()) {
+        // One shared validator performs the whole WAV check: signature, PCM
+        // fmt fields, block alignment, data chunk presence, and the declared
+        // data range against the real file size. The library metadata reader
+        // calls the same function, so a file cannot be listed and then fail
+        // here for a structural reason the list did not check.
+        WavFileInfo wavInfo{};
+        std::string parseError;
+        const WavValidation validation =
+            ParseWavFile(std::wstring(wavPath), wavInfo, parseError);
+        if (validation != WavValidation::Ok) {
             return core::Result<Player>::Err(
-                core::ErrorCode::AudioInitFailed,
+                validation == WavValidation::Unsupported
+                    ? core::ErrorCode::FormatNotSupported
+                    : core::ErrorCode::AudioInitFailed,
                 "WAV format parse failed: " + parseError);
         }
-        // Same exact-container rule as FLAC: anything outside 8/16/24/32
-        // would need bit-depth conversion, which bit-perfect forbids.
-        if (fileFormat.bitsPerSample != 8 &&
-            fileFormat.bitsPerSample != 16 &&
-            fileFormat.bitsPerSample != 24 &&
-            fileFormat.bitsPerSample != 32) {
-            return core::Result<Player>::Err(
-                core::ErrorCode::FormatNotSupported,
-                "WAV bit depth has no exact exclusive-mode PCM container");
-        }
-        if (fileFormat.channelCount == 0 || fileFormat.channelCount > 8) {
-            return core::Result<Player>::Err(
-                core::ErrorCode::FormatNotSupported,
-                "WAV channel count not supported in exclusive mode");
-        }
-        // PCM block alignment must match the channel/bit-depth layout used
-        // below. A mismatch means the declared sample stride is not
-        // channels * bytes-per-sample; reading at the derived stride would
-        // play misaligned samples, so reject rather than emit garbage.
-        const uint16_t expectedBlockAlign = static_cast<uint16_t>(
-            fileFormat.channelCount * (fileFormat.bitsPerSample / 8));
-        if (fileFormat.blockAlign != expectedBlockAlign) {
-            return core::Result<Player>::Err(
-                core::ErrorCode::FormatNotSupported,
-                "WAV block alignment does not match its channel and bit "
-                "depth");
-        }
+        fileFormat = wavInfo.format;
+        dataChunkOffset = wavInfo.dataOffset;
+        dataChunkSize = wavInfo.dataSize;
+        const uint32_t wavBytesPerFrame =
+            fileFormat.channelCount * (fileFormat.bitsPerSample / 8);
+        totalFrames = static_cast<uint32_t>(
+            dataChunkSize / wavBytesPerFrame);
     }
 
-    // Validate the WAV data chunk before touching audio hardware: an
-    // overstated header (truncated file) fails here with a clean error
-    // instead of hanging or failing mid-playback. FindDataChunk already
-    // rejects a declared range extending beyond the actual file size.
+    // Validate the decoded format before touching audio hardware. The WAV
+    // data-chunk range was already checked by ParseWavFile; FLAC sizes come
+    // from the stream header, which ParseFlacFormat validated above.
     uint32_t bytesPerFrame =
         fileFormat.channelCount * (fileFormat.bitsPerSample / 8);
-    if (!isFlac) {
-        if (!FindDataChunk(std::wstring(wavPath), dataChunkOffset,
-                           dataChunkSize)) {
-            return core::Result<Player>::Err(
-                core::ErrorCode::AudioInitFailed,
-                "Invalid WAV data chunk (not found or extends beyond end "
-                "of file)");
-        }
-        totalFrames = static_cast<uint32_t>(dataChunkSize / bytesPerFrame);
-    }
 
     HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     // A thread must balance every successful CoInitializeEx() with one
@@ -402,7 +305,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
         pEnumerator->Release();
         uninitIfOwned();
         return core::Result<Player>::Err(
-            core::ErrorCode::FormatNotSupported,
+            core::ErrorCode::DeviceFormatRejected,
             std::string("Device does not support this ") + formatKind +
                 " format in exclusive mode");
     } else {

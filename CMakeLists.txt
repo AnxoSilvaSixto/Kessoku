@@ -31,12 +31,14 @@ target_compile_definitions(kessoku_build_options INTERFACE
 # This build is tuned for this machine's CPU (AMD Ryzen 7 5700X, Zen 3).
 # AVX2 is the highest ISA level that CPU supports, and /arch:AVX2 also lets
 # MSVC use FMA and BMI. The rest is MSVC's maximum-speed profile:
-#   /O2 /Oi /Ot /Oy /GF /Gy  - speed, intrinsics, fast code, no frame pointer,
-#                              string pooling, function-level linking
+#   /O2 /Oi /Ot /GF /Gy      - speed, intrinsics, fast code, string pooling,
+#                              function-level linking
 #   /Ob3                      - more aggressive inlining than /Ob2
 #   /Gw /Zc:inline            - let the linker drop unreferenced data/COMDATs
 #   /fp:fast                  - safe here: PCM is integer, and the only FP work
 #                              is the WASAPI buffer-duration calculation
+# /Oy (omit frame pointer) is deliberately absent: MSVC does not support it on
+# x64, so listing it only documented a switch that had no effect.
 # Debug and ASan keep their /Od flags for debugging and sanitizer accuracy.
 #
 # CMake's MSVC defaults already contain /Ob2 (Release) and /Ob1
@@ -51,7 +53,6 @@ foreach(_config IN ITEMS Release RelWithDebInfo)
         "$<$<CONFIG:${_config}>:/Ob3>"
         "$<$<CONFIG:${_config}>:/Oi>"
         "$<$<CONFIG:${_config}>:/Ot>"
-        "$<$<CONFIG:${_config}>:/Oy>"
         "$<$<CONFIG:${_config}>:/GF>"
         "$<$<CONFIG:${_config}>:/Gy>"
         "$<$<CONFIG:${_config}>:/Gw>"

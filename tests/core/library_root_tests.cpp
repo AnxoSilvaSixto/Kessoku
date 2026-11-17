@@ -299,6 +299,25 @@ int main() {
           uncResult.GetError().code == kessoku::core::ErrorCode::InvalidPath,
           "Create() with a UNC share returns InvalidPath");
 
+    // (o2) The same share with forward slashes must be rejected by the
+    // pre-check, not after CreateFileW attempts a network open. This is the
+    // spelling a path pasted or normalized by another tool can produce.
+    auto forwardUncResult = kessoku::core::LibraryRoot::Create(
+        L"//server/share/music");
+    CHECK(forwardUncResult.IsErr() &&
+              forwardUncResult.GetError().code ==
+                  kessoku::core::ErrorCode::InvalidPath,
+          "Create() with a forward-slash UNC share returns InvalidPath");
+
+    // (o3) Mixed-separator extended UNC spelling.
+    auto mixedExtendedUncResult = kessoku::core::LibraryRoot::Create(
+        L"//?/UNC/server/share/music");
+    CHECK(mixedExtendedUncResult.IsErr() &&
+              mixedExtendedUncResult.GetError().code ==
+                  kessoku::core::ErrorCode::InvalidPath,
+          "Create() with a forward-slash extended UNC share returns "
+          "InvalidPath");
+
     // (p) An empty path is not a usable library root.
     auto emptyResult = kessoku::core::LibraryRoot::Create(L"");
     CHECK(emptyResult.IsErr(), "Create() with an empty path returns Err");

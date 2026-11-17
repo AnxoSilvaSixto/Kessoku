@@ -692,6 +692,37 @@ void TestMetadataMismatches(const std::wstring& dir) {
     Check(flacAsWavResult.IsErr(),
           "FLAC content at a .wav path is rejected");
 
+    // 2.1: libFLAC requires the fLaC marker at offset 0 or immediately after
+    // an ID3v2 tag. TagLib scans for the marker, so without a first-party
+    // check a .flac could list and then refuse to play.
+    const std::wstring prefixedFlac = dir + L"\\marker_prefix.flac";
+    {
+        std::vector<uint8_t> bytes = ReadBytes(validFlac);
+        std::vector<uint8_t> prefixed = {'J', 'U', 'N', 'K'};
+        prefixed.insert(prefixed.end(), bytes.begin(), bytes.end());
+        Check(WriteBytes(prefixedFlac, prefixed),
+              "write FLAC with bytes before the stream marker");
+    }
+    Check(kessoku::library::ReadTrackMetadata(
+              std::filesystem::path(prefixedFlac))
+              .IsErr(),
+          "FLAC without the marker at offset 0 or after ID3 is rejected");
+
+    const std::wstring id3PrefixedFlac = dir + L"\\id3_prefix.flac";
+    {
+        std::vector<uint8_t> bytes = ReadBytes(validFlac);
+        // ID3v2.4 header with flags 0 and a zero-length tag payload.
+        std::vector<uint8_t> prefixed = {'I', 'D', '3', 4, 0, 0,
+                                         0, 0, 0, 0};
+        prefixed.insert(prefixed.end(), bytes.begin(), bytes.end());
+        Check(WriteBytes(id3PrefixedFlac, prefixed),
+              "write FLAC after an empty ID3v2 tag");
+    }
+    Check(kessoku::library::ReadTrackMetadata(
+              std::filesystem::path(id3PrefixedFlac))
+              .IsOk(),
+          "FLAC after an ID3v2 tag reads metadata");
+
     const std::wstring zeroFlac = dir + L"\\zero.flac";
     const std::wstring zeroWav = dir + L"\\zero.wav";
     Check(WriteBytes(zeroFlac, {}), "write zero-byte .flac fixture");
@@ -759,6 +790,52 @@ void TestMetadataMismatches(const std::wstring& dir) {
               std::filesystem::path(leadingJunkWav))
               .IsOk(),
           "WAV with leading junk chunks reads metadata");
+
+    // 2.2: the pre-TagLib validator must be as strict as the player, not
+    // just check that a fmt chunk exists. Each of these files would list
+    // and then fail at the first click before the shared validator.
+    const std::wstring nonPcmWav = dir + L"\\meta_float.wav";
+    Check(WriteBytes(nonPcmWav, MakeWav(3, 2, 44100, 32)),
+          "write non-PCM WAV metadata fixture");
+    Check(kessoku::library::ReadTrackMetadata(
+              std::filesystem::path(nonPcmWav))
+              .IsErr(),
+          "non-PCM WAV is rejected before listing");
+
+    const std::wstring noDataWav = dir + L"\\meta_no_data.wav";
+    {
+        std::vector<uint8_t> bytes = MakeWavHeader();
+        AppendChunk(bytes, "fmt ", MakeFmtPayload(1, 2, 44100, 16));
+        Check(WriteBytes(noDataWav, bytes),
+              "write WAV with fmt but no data chunk");
+    }
+    Check(kessoku::library::ReadTrackMetadata(
+              std::filesystem::path(noDataWav))
+              .IsErr(),
+          "WAV without a data chunk is rejected before listing");
+
+    const std::wstring truncatedDataWav = dir + L"\\meta_truncated_data.wav";
+    {
+        std::vector<uint8_t> bytes = MakeWavHeader();
+        AppendChunk(bytes, "fmt ", MakeFmtPayload(1, 2, 44100, 16));
+        AppendTag(bytes, "data");
+        AppendU32(bytes, 64); // declared payload, only 16 bytes written
+        bytes.resize(bytes.size() + 16, 0);
+        Check(WriteBytes(truncatedDataWav, bytes),
+              "write WAV whose data range exceeds the file");
+    }
+    Check(kessoku::library::ReadTrackMetadata(
+              std::filesystem::path(truncatedDataWav))
+              .IsErr(),
+          "WAV with a data range past EOF is rejected before listing");
+
+    const std::wstring twelveBitWav = dir + L"\\meta_12bit.wav";
+    Check(WriteBytes(twelveBitWav, MakeWav(1, 2, 44100, 12)),
+          "write 12-bit WAV metadata fixture");
+    Check(kessoku::library::ReadTrackMetadata(
+              std::filesystem::path(twelveBitWav))
+              .IsErr(),
+          "WAV without an exact PCM container is rejected before listing");
 
     const std::wstring extraFmtWav = dir + L"\\fmt_extra.wav";
     {
