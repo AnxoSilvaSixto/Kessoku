@@ -200,6 +200,10 @@ std::string ParseWavFormat(const std::wstring& path, WavFormat& out) {
     return {};
 }
 
+uint8_t PcmSilenceByte(uint16_t bitsPerSample) {
+    return bitsPerSample == 8 ? 0x80 : 0x00;
+}
+
 WavValidation ParseWavFile(const std::wstring& path, WavFileInfo& out,
                            std::string& error) {
     ParsedWav parsed;

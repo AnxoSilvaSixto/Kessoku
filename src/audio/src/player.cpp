@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
+#include <avrt.h>
 #include <functiondiscoverykeys_devpkey.h>
 
 #include <algorithm>
@@ -47,6 +48,53 @@ bool IsDeviceGone(HRESULT hr) {
     return hr == AUDCLNT_E_DEVICE_INVALIDATED ||
            hr == AUDCLNT_E_SERVICE_NOT_RUNNING;
 }
+
+// Registers the render thread with MMCSS. The audio engine boosts only its
+// own transport threads; without this the exclusive-mode servicing thread
+// competes at normal priority and a late wake is an underrun. "Pro Audio" is
+// the documented class for a thread servicing a low-latency audio stream.
+// Registration failure is non-fatal: playback continues with ordinary
+// scheduling rather than refusing to play.
+class MmcssRegistration {
+public:
+    MmcssRegistration() {
+        handle_ = AvSetMmThreadCharacteristicsW(L"Pro Audio", &taskIndex_);
+    }
+    ~MmcssRegistration() {
+        if (handle_ != nullptr) {
+            AvRevertMmThreadCharacteristics(handle_);
+        }
+    }
+    MmcssRegistration(const MmcssRegistration&) = delete;
+    MmcssRegistration& operator=(const MmcssRegistration&) = delete;
+
+private:
+    HANDLE handle_ = nullptr;
+    DWORD taskIndex_ = 0;
+};
+
+// The WASAPI objects were activated in the UI thread's apartment, but the
+// render thread is a separate thread and declares its own COM model. WASAPI
+// interfaces are free-threaded, so the MTA is the documented choice for an
+// audio worker. RPC_E_CHANGED_MODE means the thread already has an apartment;
+// use it as-is and do not decrement it on exit.
+class RenderThreadCom {
+public:
+    RenderThreadCom() {
+        const HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        owns_ = SUCCEEDED(hr);
+    }
+    ~RenderThreadCom() {
+        if (owns_) {
+            CoUninitialize();
+        }
+    }
+    RenderThreadCom(const RenderThreadCom&) = delete;
+    RenderThreadCom& operator=(const RenderThreadCom&) = delete;
+
+private:
+    bool owns_ = false;
+};
 
 WAVEFORMATEXTENSIBLE BuildWavExtensible(const kessoku::audio::WavFormat& fmt) {
     WAVEFORMATEXTENSIBLE wfx{};
@@ -297,6 +345,36 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
         pClosest = nullptr;
     }
 
+    // Some device/driver pairs accept 1-2 channel PCM only as a plain
+    // WAVEFORMATEX descriptor. The samples are identical (same PCM tag, rate,
+    // channels, bit depth and stride); only the header form differs, so this
+    // is still exact exclusive-mode PCM with no shared-mode or conversion
+    // path. Multi-channel formats need the extensible channel mask, so the
+    // fallback is limited to mono/stereo.
+    WAVEFORMATEX wfxPlain{};
+    bool usePlainFormat = false;
+    if (hr == AUDCLNT_E_UNSUPPORTED_FORMAT && fileFormat.channelCount <= 2) {
+        wfxPlain.wFormatTag = WAVE_FORMAT_PCM;
+        wfxPlain.nChannels = fileFormat.channelCount;
+        wfxPlain.nSamplesPerSec = fileFormat.sampleRate;
+        wfxPlain.nAvgBytesPerSec = fileFormat.sampleRate * fileFormat.blockAlign;
+        wfxPlain.nBlockAlign = fileFormat.blockAlign;
+        wfxPlain.wBitsPerSample = fileFormat.bitsPerSample;
+        wfxPlain.cbSize = 0;
+
+        pClosest = nullptr;
+        hr = pAudioClient->IsFormatSupported(
+            AUDCLNT_SHAREMODE_EXCLUSIVE, &wfxPlain, &pClosest);
+        if (pClosest) {
+            CoTaskMemFree(pClosest);
+            pClosest = nullptr;
+        }
+        usePlainFormat = (hr == S_OK);
+    }
+
+    WAVEFORMATEX* acceptedFormat =
+        usePlainFormat ? &wfxPlain : reinterpret_cast<WAVEFORMATEX*>(&wfxExt);
+
     if (hr == S_OK) {
         // format supported
     } else if (hr == AUDCLNT_E_UNSUPPORTED_FORMAT) {
@@ -337,7 +415,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
         AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
         hnsBufferDuration,
         hnsBufferDuration,
-        reinterpret_cast<WAVEFORMATEX*>(&wfxExt),
+        acceptedFormat,
         nullptr);
 
     if (hr == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED) {
@@ -408,7 +486,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
             AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
             hnsBufferDuration,
             hnsBufferDuration,
-            reinterpret_cast<WAVEFORMATEX*>(&wfxExt),
+            acceptedFormat,
             nullptr);
     }
 
@@ -491,6 +569,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
     player.hWakeEvent_ = hWakeEvent;
     player.bufferFrameCount_ = bufferFrameCount;
     player.bytesPerFrame_ = bytesPerFrame;
+    player.silenceByte_ = PcmSilenceByte(fileFormat.bitsPerSample);
     player.dataChunkOffset_ = dataChunkOffset;
     player.dataChunkSize_ = dataChunkSize;
     player.ownsCom_ = ownsComInit;
@@ -853,6 +932,12 @@ uint32_t Player::GetSampleRate() const noexcept {
 }
 
 void Player::RenderThreadEntry() {
+    // Both guards cover every early return below. COM ownership is declared
+    // before any WASAPI call; MMCSS registration makes this the stream's
+    // "Pro Audio" servicing thread for as long as it runs.
+    RenderThreadCom com;
+    MmcssRegistration mmcss;
+
     if (sourceKind_ == SourceKind::Flac) {
         OpenFlacFile();
         if (!flacReader_.IsOpen()) {
@@ -1112,9 +1197,12 @@ bool Player::RenderIteration() {
         return false;
     }
 
-    // Zero out buffer (silence for EOF). Widen before multiplying so the
-    // byte count cannot wrap in 32 bits.
-    std::memset(pData, 0,
+    // Pre-fill the buffer with the format's silence value. Zero is silence
+    // for signed 16/24/32-bit PCM but full negative in unsigned 8-bit PCM,
+    // so an 8-bit tail padded with 0x00 would be a DC step for the rest of
+    // the final partial period. Widen before multiplying so the byte count
+    // cannot wrap in 32 bits.
+    std::memset(pData, silenceByte_,
                 static_cast<size_t>(bufferFrameCount_) * bytesPerFrame_);
 
     // Read frames from the source: WAV file bytes or decoded FLAC samples.

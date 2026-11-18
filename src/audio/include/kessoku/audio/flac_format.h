@@ -82,7 +82,8 @@ public:
     // ReadFrames/Open on the decoding thread). Public only because C
     // callbacks cannot be private members; not part of the usable API.
     bool PushDecodedFrame(uint32_t frameChannels, uint32_t frameBitsPerSample,
-                          uint32_t blockSize, const int32_t* const* buffer);
+                          uint32_t frameSampleRate, uint32_t blockSize,
+                          const int32_t* const* buffer);
     void FlagDecodeError();
 
 private:
@@ -97,6 +98,7 @@ private:
     uint32_t bytesPerFrame_ = 0;
     uint32_t bitsPerSample_ = 0;
     uint32_t channelCount_ = 0;
+    uint32_t sampleRate_ = 0;
     mutable std::mutex mutex_;
 };
 

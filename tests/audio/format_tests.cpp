@@ -272,6 +272,17 @@ void TestWavParsing(const std::wstring& dir) {
     Check(format.channelCount == 2, "valid WAV channel count");
     Check(format.bitsPerSample == 16, "valid WAV bit depth");
     Check(format.blockAlign == 4, "valid WAV block alignment");
+
+    // 1.5: silence padding must use the PCM format's own zero level. For
+    // unsigned 8-bit PCM that is 0x80, not the 0x00 used by signed depths.
+    Check(kessoku::audio::PcmSilenceByte(8) == 0x80,
+          "8-bit PCM silence byte is 0x80");
+    Check(kessoku::audio::PcmSilenceByte(16) == 0x00,
+          "16-bit PCM silence byte is 0x00");
+    Check(kessoku::audio::PcmSilenceByte(24) == 0x00,
+          "24-bit PCM silence byte is 0x00");
+    Check(kessoku::audio::PcmSilenceByte(32) == 0x00,
+          "32-bit PCM silence byte is 0x00");
     Check(format.byteRate == 176400, "valid WAV byte rate");
 
     const std::wstring extraFmtPath = dir + L"\\fmt_extra.wav";
@@ -646,6 +657,23 @@ void TestFlacParsing(const std::wstring& dir) {
         kessoku::audio::FlacFormat ignored{};
         Check(!kessoku::audio::ParseFlacFormat(randomPath, ignored).empty(),
               "random bytes at a .flac path are rejected");
+    }
+
+    // 1.4: a mid-stream sample-rate change must be rejected, not played at
+    // the opening rate. PushDecodedFrame is the synchronous libFLAC write
+    // callback body, so a frame header with a different rate exercises the
+    // same gate a real stream change does.
+    {
+        kessoku::audio::FlacReader reader;
+        Check(reader.Open(validPath, format, 0).empty(),
+              "FlacReader opens the valid fixture");
+        int32_t sample = 0;
+        const int32_t* channels[1] = {&sample};
+        Check(reader.PushDecodedFrame(1, 16, 44100, 1, channels),
+              "FLAC frame at the opening sample rate is accepted");
+        Check(!reader.PushDecodedFrame(1, 16, 48000, 1, channels),
+              "FLAC frame with a changed sample rate is rejected");
+        reader.Close();
     }
 
     kessoku::audio::FlacFormat ignored{};

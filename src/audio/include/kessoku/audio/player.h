@@ -52,6 +52,7 @@ public:
           totalFrames_(other.totalFrames_),
           bufferFrameCount_(other.bufferFrameCount_),
           bytesPerFrame_(other.bytesPerFrame_),
+          silenceByte_(other.silenceByte_),
           currentFrame_(other.currentFrame_),
           ownsCom_(other.ownsCom_),
           ownerThreadId_(other.ownerThreadId_),
@@ -182,6 +183,10 @@ private:
     uint32_t totalFrames_;
     uint32_t bufferFrameCount_ = 0;
     uint32_t bytesPerFrame_ = 0;
+    // Byte value that means digital silence in the negotiated PCM format:
+    // 0x00 for signed 16/24/32-bit, 0x80 for unsigned 8-bit. Used to silence
+    // the tail of a partially filled buffer.
+    uint8_t silenceByte_ = 0;
 
     // Serializes a whole RenderIteration against Pause()/Seek(). Without it,
     // an iteration that passed the loop's Playing check before Pause() could

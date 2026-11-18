@@ -37,6 +37,11 @@ enum class WavValidation {
 // and its range must also be validated.
 std::string ParseWavFormat(const std::wstring& path, WavFormat& out);
 
+// Byte value that represents digital silence in interleaved PCM: 0x80 for
+// unsigned 8-bit samples, 0x00 for signed 16/24/32-bit containers. Used to
+// pad the tail of a partially filled render buffer.
+uint8_t PcmSilenceByte(uint16_t bitsPerSample);
+
 // Validate a complete WAV file: RIFF/WAVE signature, a PCM fmt chunk with
 // non-zero fields, consistent block alignment, a data chunk, and a declared
 // data range that fits inside the file. Also rejects valid PCM layouts the

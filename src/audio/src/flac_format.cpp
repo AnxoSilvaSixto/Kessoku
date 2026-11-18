@@ -39,6 +39,7 @@ FLAC__StreamDecoderWriteStatus FlacWriteCallback(
     }
     const bool ok = self->PushDecodedFrame(frame->header.channels,
                                            frame->header.bits_per_sample,
+                                           frame->header.sample_rate,
                                            frame->header.blocksize,
                                            buffer);
     return ok ? FLAC__STREAM_DECODER_WRITE_STATUS_CONTINUE
@@ -182,6 +183,7 @@ std::string FlacReader::Open(const std::wstring& path, const FlacFormat& fmt,
     }
     channelCount_ = fmt.channelCount;
     bitsPerSample_ = fmt.bitsPerSample;
+    sampleRate_ = fmt.sampleRate;
     bytesPerFrame_ = fmt.channelCount * (fmt.bitsPerSample / 8);
 
     std::string utf8Path;
@@ -315,14 +317,17 @@ bool FlacReader::ReachedEnd() const {
 
 bool FlacReader::PushDecodedFrame(uint32_t frameChannels,
                                   uint32_t frameBitsPerSample,
+                                  uint32_t frameSampleRate,
                                   uint32_t blockSize,
                                   const int32_t* const* buffer) {
     // Called synchronously from the decoding thread while it already holds
     // mutex_; must not lock. Rejects mid-stream format changes: the Player
-    // negotiates one exclusive-mode format up front, so a frame in any other
-    // format ends the stream cleanly instead of being converted.
+    // negotiates one exclusive-mode format up front, so a frame at another
+    // rate, channel count, or bit depth ends the stream cleanly instead of
+    // being resampled or converted.
     if (buffer == nullptr || frameChannels != channelCount_ ||
-        frameBitsPerSample != bitsPerSample_) {
+        frameBitsPerSample != bitsPerSample_ ||
+        frameSampleRate != sampleRate_) {
         error_ = true;
         return false;
     }

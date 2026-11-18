@@ -14,6 +14,7 @@ target_link_libraries(kessoku_audio PUBLIC
 
 target_link_libraries(kessoku_audio PRIVATE
     kessoku_build_options
+    avrt
 )
 
 # Completes the approved libFLAC decision (CLAUDE.md 16.1): Kessoku.exe
