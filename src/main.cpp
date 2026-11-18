@@ -17,6 +17,7 @@
 #include "transport_position.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <new>
@@ -49,6 +50,9 @@ enum ControlIds {
 
 struct ScanResultData {
     std::vector<std::pair<std::filesystem::path, kessoku::library::TrackMetadata>> tracks;
+    // Files the scan found but whose metadata could not be read. Reported to
+    // the user instead of letting those rows disappear silently.
+    std::size_t unreadable = 0;
 };
 
 namespace {
@@ -245,7 +249,16 @@ public:
         }
 
         if (!m_player.has_value()) {
-            m_statusLabel.SetWindowTextW(L"Ready");
+            if (data->unreadable != 0) {
+                std::wstring status = L"Ready - ";
+                status += std::to_wstring(data->unreadable);
+                status += (data->unreadable == 1)
+                              ? L" file could not be read"
+                              : L" files could not be read";
+                m_statusLabel.SetWindowTextW(status.c_str());
+            } else {
+                m_statusLabel.SetWindowTextW(L"Ready");
+            }
         }
 
         return 0;
@@ -611,7 +624,7 @@ std::wstring PickFolder(HWND owner)
     return result;
 }
 
-void RunScanAndPost(HWND hWnd, const std::wstring& folderPath)
+void RunScanAndPost(HWND hWnd, kessoku::core::LibraryRoot root)
 {
     // Allocated up front so a failure on any path below still posts an empty
     // result: the UI thread must always hear back, and a detached thread
@@ -623,49 +636,53 @@ void RunScanAndPost(HWND hWnd, const std::wstring& folderPath)
     }
 
     try {
-        auto rootResult = kessoku::core::LibraryRoot::Create(folderPath);
-        if (!rootResult.IsOk()) {
-            const auto& err = rootResult.GetError();
-            OutputDebugStringA("Kessoku: library root create failed: ");
-            OutputDebugStringA(err.message.c_str());
-            OutputDebugStringA("\n");
-        } else {
-            const auto& root = rootResult.Value();
-            auto scanResult = kessoku::library::Scan(root);
+        auto scanResult = kessoku::library::Scan(root);
 
-            for (const auto& skipped : scanResult.skipped) {
-                OutputDebugStringA("Kessoku: scan skipped: ");
-                OutputDebugStringA(skipped.reason.c_str());
+#if defined(_DEBUG)
+        for (const auto& skipped : scanResult.skipped) {
+            OutputDebugStringA("Kessoku: scan skipped: ");
+            OutputDebugStringA(skipped.reason.c_str());
+            OutputDebugStringA(" - ");
+            const std::string utf8 = kessoku::core::WideToUtf8(
+                skipped.path.wstring());
+            OutputDebugStringA(utf8.c_str());
+            OutputDebugStringA("\n");
+        }
+#endif
+
+        std::sort(scanResult.files.begin(), scanResult.files.end());
+        data->tracks.reserve(scanResult.files.size());
+
+        for (const auto& filePath : scanResult.files) {
+            auto metaResult =
+                kessoku::library::ReadTrackMetadata(root, filePath);
+            if (metaResult.IsOk()) {
+                data->tracks.emplace_back(filePath, metaResult.Value());
+            } else {
+                ++data->unreadable;
+#if defined(_DEBUG)
+                const auto& err = metaResult.GetError();
+                OutputDebugStringA("Kessoku: metadata read failed: ");
+                OutputDebugStringA(err.message.c_str());
                 OutputDebugStringA(" - ");
                 const std::string utf8 = kessoku::core::WideToUtf8(
-                    skipped.path.wstring());
+                    filePath.wstring());
                 OutputDebugStringA(utf8.c_str());
                 OutputDebugStringA("\n");
-            }
-
-            std::sort(scanResult.files.begin(), scanResult.files.end());
-            data->tracks.reserve(scanResult.files.size());
-
-            for (const auto& filePath : scanResult.files) {
-                auto metaResult =
-                    kessoku::library::ReadTrackMetadata(root, filePath);
-                if (metaResult.IsOk()) {
-                    data->tracks.emplace_back(filePath, metaResult.Value());
-                } else {
-                    const auto& err = metaResult.GetError();
-                    OutputDebugStringA("Kessoku: metadata read failed: ");
-                    OutputDebugStringA(err.message.c_str());
-                    OutputDebugStringA("\n");
-                }
+#endif
             }
         }
     } catch (const std::exception& ex) {
+#if defined(_DEBUG)
         OutputDebugStringA("Kessoku: scan failed: ");
         OutputDebugStringA(ex.what());
         OutputDebugStringA("\n");
+#endif
         data->tracks.clear();
     } catch (...) {
+#if defined(_DEBUG)
         OutputDebugStringA("Kessoku: scan failed with an unknown exception\n");
+#endif
         data->tracks.clear();
     }
 
@@ -687,6 +704,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
     _Module.Init(nullptr, hInstance);
     AtlInitCommonControls(ICC_LISTVIEW_CLASSES | ICC_BAR_CLASSES);
 
+#if defined(_DEBUG)
+    // Dependency bring-up probe: proves the linked FLAC/TagLib/ATL code runs,
+    // not just compiles. Debug-only; release launches stay silent.
     OutputDebugStringA("Kessoku: FLAC version = ");
     OutputDebugStringA(FLAC__VERSION_STRING);
     OutputDebugStringA(FLAC__format_sample_rate_is_valid(44100) != 0 ? " (44100 valid)\n" : " (44100 invalid)\n");
@@ -697,6 +717,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
 
     OutputDebugStringA("kessoku_core: LibraryRoot type available\n");
     (void)kessoku::core::ErrorCode::Ok;
+#endif
 
     MainWindow win;
     RECT rc = { 0, 0, 800, 600 };
@@ -721,11 +742,13 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int)
             continue; // Re-prompt
         }
 
-        // Keep the validated root in the window: PlaySelected() re-checks
-        // containment against it immediately before Player::Create().
-        win.SetLibraryRoot(std::move(rootResult.Value()));
+        // Keep one validated root and share it: the scan thread and the
+        // window must agree on the same canonical root, and re-running
+        // Create() here would repeat the filesystem resolution.
+        kessoku::core::LibraryRoot root = std::move(rootResult.Value());
+        win.SetLibraryRoot(root);
 
-        std::thread scanThread(RunScanAndPost, win.m_hWnd, folder);
+        std::thread scanThread(RunScanAndPost, win.m_hWnd, std::move(root));
         scanThread.detach();
         break;
     }

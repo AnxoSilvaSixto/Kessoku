@@ -151,26 +151,35 @@ int main() {
     CHECK(mixed.find(L'\uFFFD') != std::wstring::npos,
           "invalid byte is replaced inside valid text");
 
-    // A lone surrogate is not encodable UTF-8; the converter must replace it
-    // rather than emit an invalid byte sequence or crash.
+    // A lone surrogate is not encodable UTF-8. Mapping it to U+FFFD would
+    // silently rename a path -- libFLAC would open a different sibling that
+    // could sit outside the library root -- so conversion must fail closed.
     const std::wstring loneSurrogate(1, static_cast<wchar_t>(0xD800));
-    const std::string surrogateUtf8 = WideToUtf8(loneSurrogate);
-    CHECK(!surrogateUtf8.empty(), "lone surrogate encodes to replacement text");
-    CHECK(surrogateUtf8 == "\xEF\xBF\xBD",
-          "lone surrogate becomes U+FFFD in UTF-8");
+    CHECK(WideToUtf8(loneSurrogate).empty(),
+          "lone high surrogate is rejected");
 
     const std::wstring loneLowSurrogate(1, static_cast<wchar_t>(0xDC00));
-    CHECK(WideToUtf8(loneLowSurrogate) == "\xEF\xBF\xBD",
-          "lone low surrogate becomes U+FFFD in UTF-8");
+    CHECK(WideToUtf8(loneLowSurrogate).empty(),
+          "lone low surrogate is rejected");
 
     // A high surrogate followed by a non-low-surrogate is not a valid pair.
     const std::wstring brokenPair = {
         static_cast<wchar_t>(0xD800), L'A'};
-    const std::wstring decodedPair = Utf8ToWide(WideToUtf8(brokenPair));
-    CHECK(decodedPair.find(L'\uFFFD') != std::wstring::npos,
-          "unpaired high surrogate becomes U+FFFD");
-    CHECK(decodedPair.find(L'A') != std::wstring::npos,
-          "text after an unpaired surrogate survives");
+    CHECK(WideToUtf8(brokenPair).empty(),
+          "unpaired high surrogate is rejected");
+
+    // Reversed order is not a pair either.
+    const std::wstring reversedPair = {
+        static_cast<wchar_t>(0xDC00), static_cast<wchar_t>(0xD800)};
+    CHECK(WideToUtf8(reversedPair).empty(),
+          "reversed surrogate pair is rejected");
+
+    // Valid text around an unpaired surrogate must not be rewritten into a
+    // different name either; the whole conversion fails.
+    const std::wstring validAroundBad = {
+        L'k', L'e', static_cast<wchar_t>(0xD800), L's'};
+    CHECK(WideToUtf8(validAroundBad).empty(),
+          "text around an unpaired surrogate is rejected");
 
     if (gFailures == 0) {
         printf("\n=== Results: 0 failures ===\n");

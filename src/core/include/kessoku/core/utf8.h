@@ -10,7 +10,9 @@ namespace kessoku::core {
 //
 // Both functions return an empty string when conversion fails; an empty input
 // also yields an empty result, so callers that cannot distinguish "empty" from
-// "failed" should check the input first.
+// "failed" should check the input first. WideToUtf8 treats unpaired UTF-16
+// surrogates as a failure: replacing them with U+FFFD would silently produce
+// a different path than the one the caller validated.
 std::string WideToUtf8(std::wstring_view text);
 
 std::wstring Utf8ToWide(std::string_view text);

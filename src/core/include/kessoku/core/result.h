@@ -1,6 +1,7 @@
 #pragma once
 
 #include "kessoku/core/error.h"
+#include <cassert>
 #include <cstddef>
 #include <string_view>
 #include <type_traits>
@@ -26,8 +27,11 @@ class [[nodiscard]] Result {
 public:
     [[nodiscard]] static Result Ok(T&& value) {
         Result r;
+        // A throwing payload constructor must leave r empty: the destructor
+        // below only destroys storage_ after this flag is set.
         new (&r.storage_[0]) T(std::move(value));
         r.is_ok_ = true;
+        r.has_value_ = true;
         return r;
     }
 
@@ -35,6 +39,7 @@ public:
         Result r;
         new (&r.storage_[0]) Error{code, std::string{message}};
         r.is_ok_ = false;
+        r.has_value_ = true;
         return r;
     }
 
@@ -42,19 +47,24 @@ public:
     [[nodiscard]] bool IsErr() const noexcept { return !is_ok_; }
 
     [[nodiscard]] const T& Value() const {
+        assert(is_ok_ && has_value_);
         return *reinterpret_cast<const T*>(&storage_[0]);
     }
 
     [[nodiscard]] T& Value() {
+        assert(is_ok_ && has_value_);
         return *reinterpret_cast<T*>(&storage_[0]);
     }
 
     [[nodiscard]] const Error& GetError() const {
+        assert(!is_ok_ && has_value_);
         return *reinterpret_cast<const Error*>(&storage_[0]);
     }
 
     ~Result() {
-        detail::DestroyValue<T>(&storage_[0], is_ok_);
+        if (has_value_) {
+            detail::DestroyValue<T>(&storage_[0], is_ok_);
+        }
     }
 
     // Non-copyable
@@ -69,6 +79,7 @@ public:
             new (&storage_[0]) Error(std::move(*reinterpret_cast<Error*>(&other.storage_[0])));
         }
         is_ok_ = other.is_ok_;
+        has_value_ = true;
     }
 
     Result& operator=(Result&& other) noexcept {
@@ -83,6 +94,9 @@ private:
 
     alignas(max_align_t) unsigned char storage_[sizeof(T) > sizeof(Error) ? sizeof(T) : sizeof(Error)];
     bool is_ok_ = false;
+    // False until a payload has actually been constructed in storage_. A
+    // throwing construction then leaves nothing for ~Result to destroy.
+    bool has_value_ = false;
 };
 
 using Status = Result<void>;
@@ -93,6 +107,7 @@ public:
     [[nodiscard]] static Result<void> Ok() {
         Result<void> r;
         r.is_ok_ = true;
+        r.has_value_ = true;
         return r;
     }
 
@@ -100,6 +115,7 @@ public:
         Result<void> r;
         new (&r.storage_[0]) Error{code, std::string{message}};
         r.is_ok_ = false;
+        r.has_value_ = true;
         return r;
     }
 
@@ -107,11 +123,12 @@ public:
     [[nodiscard]] bool IsErr() const noexcept { return !is_ok_; }
 
     [[nodiscard]] const Error& GetError() const {
+        assert(!is_ok_ && has_value_);
         return *reinterpret_cast<const Error*>(&storage_[0]);
     }
 
     ~Result() {
-        if (!is_ok_) {
+        if (has_value_ && !is_ok_) {
             reinterpret_cast<Error*>(&storage_[0])->~Error();
         }
     }
@@ -124,6 +141,7 @@ public:
         if (!is_ok_) {
             new (&storage_[0]) Error(std::move(*reinterpret_cast<Error*>(&other.storage_[0])));
         }
+        has_value_ = true;
     }
 
     Result& operator=(Result&& other) noexcept {
@@ -138,6 +156,7 @@ private:
 
     alignas(max_align_t) unsigned char storage_[sizeof(Error)];
     bool is_ok_ = false;
+    bool has_value_ = false;
 };
 
 } // namespace kessoku::core

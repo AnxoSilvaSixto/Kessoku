@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <exception>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -57,6 +58,15 @@ public:
           ownsCom_(other.ownsCom_),
           ownerThreadId_(other.ownerThreadId_),
           state_(other.state_.load()) {
+        // A live render thread captured `&other` when Play() started it, so
+        // transferring that thread to a new Player would leave it reading
+        // the moved-from object. Only the pre-Play move performed between
+        // Create() and the caller's storage is supported; moving a playing
+        // Player is a programming error with no safe recovery, so fail
+        // fast in every configuration instead of corrupting playback.
+        if (renderThread_.joinable()) {
+            std::terminate();
+        }
         other.pEnumerator_ = nullptr;
         other.pDevice_ = nullptr;
         other.pAudioClient_ = nullptr;

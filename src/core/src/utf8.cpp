@@ -15,15 +15,21 @@ std::string WideToUtf8(std::wstring_view text) {
         return {};
     }
     const int inputLength = static_cast<int>(text.size());
+    // WC_ERR_INVALID_CHARS makes unpaired surrogates a conversion failure.
+    // Without it Windows substitutes U+FFFD, which would hand libFLAC a
+    // path naming a different (possibly outside-the-root) sibling file.
+    // Failing here keeps the one-name-in, one-name-out contract that the
+    // filesystem boundary depends on.
     const int required = WideCharToMultiByte(
-        CP_UTF8, 0, text.data(), inputLength, nullptr, 0, nullptr, nullptr);
+        CP_UTF8, WC_ERR_INVALID_CHARS, text.data(), inputLength, nullptr, 0,
+        nullptr, nullptr);
     if (required <= 0) {
         return {};
     }
     std::string result(static_cast<size_t>(required), '\0');
     const int written = WideCharToMultiByte(
-        CP_UTF8, 0, text.data(), inputLength, result.data(), required, nullptr,
-        nullptr);
+        CP_UTF8, WC_ERR_INVALID_CHARS, text.data(), inputLength, result.data(),
+        required, nullptr, nullptr);
     if (written != required) {
         return {};
     }

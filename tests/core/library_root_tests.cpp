@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -477,6 +478,28 @@ int main() {
               extendedUncResult.GetError().code ==
                   kessoku::core::ErrorCode::InvalidPath,
           "Create() with an extended UNC share returns InvalidPath");
+
+    // (ac) Result<T> must survive a throwing payload constructor: its
+    // destructor may only destroy storage that was actually constructed. A
+    // bogus Error destruction here would read uninitialized string state and
+    // crash under ASan.
+    {
+        struct ThrowingPayload {
+            ThrowingPayload() = default;
+            ThrowingPayload(ThrowingPayload&&) {
+                throw std::runtime_error("payload move failed");
+            }
+        };
+        bool threw = false;
+        try {
+            (void)kessoku::core::Result<ThrowingPayload>::Ok(
+                ThrowingPayload{});
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        CHECK(threw,
+              "Result::Ok propagates a throwing payload constructor");
+    }
 
     // --- Cleanup ---
     std::error_code cleanupEc;
