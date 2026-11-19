@@ -180,14 +180,15 @@ void ExpectFlacError(const std::wstring& path, const char* desc) {
     Check(!error.empty(), desc);
 }
 
-bool WriteFlac(const std::wstring& path, uint32_t frames) {
+bool WriteFlac(const std::wstring& path, uint32_t frames,
+               uint16_t bitsPerSample = 16) {
     FLAC__StreamEncoder* encoder = FLAC__stream_encoder_new();
     if (encoder == nullptr) {
         return false;
     }
 
     FLAC__stream_encoder_set_channels(encoder, 1);
-    FLAC__stream_encoder_set_bits_per_sample(encoder, 16);
+    FLAC__stream_encoder_set_bits_per_sample(encoder, bitsPerSample);
     FLAC__stream_encoder_set_sample_rate(encoder, 44100);
     FLAC__stream_encoder_set_total_samples_estimate(encoder, frames);
 
@@ -750,6 +751,33 @@ void TestMetadataMismatches(const std::wstring& dir) {
               std::filesystem::path(id3PrefixedFlac))
               .IsOk(),
           "FLAC after an ID3v2 tag reads metadata");
+
+    // libFLAC can read STREAMINFO for a bit depth the player has no exact
+    // PCM container for. Such a file must not be listed and then fail on the
+    // first click; the library applies the same depth allow-list as
+    // Player::Create.
+    const std::wstring twentyBitFlac = dir + L"\\twenty_bit.flac";
+    Check(WriteFlac(twentyBitFlac, 44100, 20),
+          "write 20-bit FLAC fixture");
+    {
+        kessoku::audio::FlacFormat format{};
+        Check(kessoku::audio::ParseFlacFormat(twentyBitFlac, format).empty(),
+              "20-bit FLAC STREAMINFO parses");
+        Check(format.bitsPerSample == 20,
+              "20-bit FLAC reports 20 bits per sample");
+    }
+    Check(kessoku::library::ReadTrackMetadata(
+              std::filesystem::path(twentyBitFlac))
+              .IsErr(),
+          "library rejects a 20-bit FLAC with no PCM container");
+
+    const std::wstring twentyFourBitFlac = dir + L"\\twenty_four_bit.flac";
+    Check(WriteFlac(twentyFourBitFlac, 44100, 24),
+          "write 24-bit FLAC fixture");
+    Check(kessoku::library::ReadTrackMetadata(
+              std::filesystem::path(twentyFourBitFlac))
+              .IsOk(),
+          "library accepts a 24-bit FLAC");
 
     const std::wstring zeroFlac = dir + L"\\zero.flac";
     const std::wstring zeroWav = dir + L"\\zero.wav";
