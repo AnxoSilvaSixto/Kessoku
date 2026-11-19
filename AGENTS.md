@@ -32,7 +32,7 @@ Full reasoning for each choice is in `CLAUDE.md` §16.1–16.2 if you want it �
 
 ## Build tuning and PGO (decided — don't re-litigate)
 
-Release and RelWithDebInfo use MSVC's maximum-speed profile for this machine: `/O2 /Ob3 /Oi /Ot /Oy /GF /Gy /Gw /Zc:inline /arch:AVX2 /fp:fast`, with `/GL` and `/LTCG /OPT:REF /OPT:ICF`. Debug and ASan stay unoptimized. The project-local `triplets\x64-windows-native.cmake` builds Release vcpkg dependencies with the same tuning, so the app and its DLLs all target this AVX2/Zen 3 machine and are not portable to older x64 CPUs. The PGO presets use `triplets\x64-windows-native-pgo.cmake`, which adds `/GENPROFILE`.
+Release and RelWithDebInfo use MSVC's maximum-speed profile for this machine: `/O2 /Ob3 /Oi /Ot /GF /Gy /Gw /Zc:inline /arch:AVX2 /fp:fast`, with `/GL` and `/LTCG /OPT:REF /OPT:ICF`. Debug and ASan stay unoptimized. The project-local `triplets\x64-windows-native.cmake` builds Release vcpkg dependencies with the same tuning, so the app and its DLLs all target this AVX2/Zen 3 machine and are not portable to older x64 CPUs. The PGO presets use `triplets\x64-windows-native-pgo.cmake`, which adds `/GENPROFILE`.
 
 Profile-guided optimization is opt-in and local: `scripts\pgo.ps1` trains the real `Kessoku.exe` and the dependency DLLs, and all profiles and training media stay under the gitignored `build-pgo\` tree. Normal `default`/`release` builds neither produce nor consume profiles. Don't commit PGD/PGC files, and don't claim PGO is active for a normal build.
 

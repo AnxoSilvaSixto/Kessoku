@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.31)
 
 project(Kessoku VERSION 0.1.0 LANGUAGES CXX)
 
-# C++20 is the newest standard MSVC 19.51 implements without preview mode.
+# C++20 is the newest standard MSVC 19.52 implements without preview mode.
 # C++23 remains deferred until MSVC ships final /std:c++23 (see commit 811e4a5).
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

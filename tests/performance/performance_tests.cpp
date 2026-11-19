@@ -26,9 +26,11 @@
 namespace {
 
 // The Doherty Threshold is the point (400 ms) past which an interactive
-// response stops feeling immediate. These are not microbenchmarks: each
-// scenario times a complete user-visible operation (scan, metadata read,
-// decode) so a regression that would be felt in the UI fails the suite.
+// response stops feeling immediate. Each scenario times a library or decode
+// workload the application actually runs (scan, metadata read, decode) or a
+// hot helper it calls per UI tick, so a regression that would be felt in the
+// UI fails the suite. Measurements are warm-cache and synthetic: UI row
+// population and audio-device initialization are outside these numbers.
 constexpr double kDohertyThresholdMs = 400.0;
 
 // AddressSanitizer instrumentation makes CPU-bound helpers several times
@@ -109,14 +111,43 @@ void AppendU32(std::vector<uint8_t>& bytes, uint32_t value) {
     bytes.push_back(static_cast<uint8_t>((value >> 24) & 0xFF));
 }
 
-bool WriteWavFile(const std::wstring& path, uint32_t frames) {
+void AppendInfoEntry(std::vector<uint8_t>& bytes, const char id[4],
+                     std::string_view value) {
+    bytes.insert(bytes.end(), id, id + 4);
+    AppendU32(bytes, static_cast<uint32_t>(value.size()));
+    bytes.insert(bytes.end(), value.begin(), value.end());
+    if ((value.size() % 2) != 0) {
+        bytes.push_back(0); // RIFF chunks are word-aligned.
+    }
+}
+
+bool WriteWavFile(const std::wstring& path, uint32_t frames,
+                  bool withInfoTags = false) {
     constexpr uint16_t kChannels = 2;
     constexpr uint16_t kBits = 16;
     constexpr uint32_t kSampleRate = 44100;
     const uint16_t blockAlign =
         static_cast<uint16_t>(kChannels * (kBits / 8));
     const uint32_t dataBytes = frames * blockAlign;
-    const uint32_t riffSize = 36 + dataBytes;
+
+    // Real albums carry tags; an empty LIST/INFO chunk would let the launch
+    // benchmark measure file opens while skipping the TagLib parsing the
+    // application actually pays for.
+    std::vector<uint8_t> listChunk;
+    if (withInfoTags) {
+        std::vector<uint8_t> info;
+        AppendInfoEntry(info, "INAM", "Benchmark Track");
+        AppendInfoEntry(info, "IART", "Kessoku");
+        AppendInfoEntry(info, "IPRD", "Performance");
+        AppendInfoEntry(info, "ICRD", "2026");
+        listChunk.insert(listChunk.end(), {'L', 'I', 'S', 'T'});
+        AppendU32(listChunk, static_cast<uint32_t>(4 + info.size()));
+        listChunk.insert(listChunk.end(), {'I', 'N', 'F', 'O'});
+        listChunk.insert(listChunk.end(), info.begin(), info.end());
+    }
+
+    const uint32_t riffSize =
+        36 + dataBytes + static_cast<uint32_t>(listChunk.size());
 
     std::vector<uint8_t> bytes;
     bytes.reserve(static_cast<size_t>(riffSize) + 8);
@@ -131,6 +162,7 @@ bool WriteWavFile(const std::wstring& path, uint32_t frames) {
     AppendU32(bytes, kSampleRate * blockAlign);
     AppendU16(bytes, blockAlign);
     AppendU16(bytes, kBits);
+    bytes.insert(bytes.end(), listChunk.begin(), listChunk.end());
     bytes.insert(bytes.end(), {'d', 'a', 't', 'a'});
     AppendU32(bytes, dataBytes);
     bytes.resize(bytes.size() + dataBytes, 0);
@@ -240,6 +272,12 @@ void Report(const char* name, int iterations, Fn&& action) {
     if (!ok) {
         ++gFailures;
     }
+}
+
+template <typename Fn>
+void ReportProbe(const char* name, int iterations, Fn&& action) {
+    const double ms = MeasureWorstMs(iterations, action);
+    printf("PROBE: %-48s %8.2f ms (reported, not budgeted)\n", name, ms);
 }
 
 std::wstring MakeBenchmarkLibrary(const std::wstring& root,
@@ -378,13 +416,52 @@ void RunMixedLibraryBenchmark() {
           "timed mixed-library scan returns only audio files");
 }
 
+// Builds an artist/album/track tree with RIFF INFO tags and non-audio
+// sidecars, matching the shape of a real library instead of flat zero-byte
+// fixtures.
+bool MakeTaggedLaunchLibrary(const std::wstring& root, int artists,
+                             int albumsPerArtist, int tracksPerAlbum) {
+    for (int a = 0; a < artists; ++a) {
+        const std::wstring artistName = L"artist_" + std::to_wstring(a);
+        if (!CreateSubdir(root, artistName)) {
+            return false;
+        }
+        const std::wstring artistDir = root + L"\\" + artistName;
+
+        for (int album = 0; album < albumsPerArtist; ++album) {
+            const std::wstring albumName =
+                L"album_" + std::to_wstring(album);
+            if (!CreateSubdir(artistDir, albumName)) {
+                return false;
+            }
+            const std::wstring albumDir = artistDir + L"\\" + albumName;
+
+            for (int f = 0; f < tracksPerAlbum; ++f) {
+                const std::wstring path =
+                    albumDir + L"\\track_" + std::to_wstring(f) + L".wav";
+                if (!WriteWavFile(path, 0, true)) {
+                    return false;
+                }
+            }
+
+            if (!CreateFileInDir(albumDir, L"cover.jpg") ||
+                !CreateFileInDir(albumDir, L"notes.txt")) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 // Mirrors the real startup path in main.cpp: scan the library root, then read
 // metadata for every discovered track. This is the operation a user waits on
 // when opening a library, so it gets the Doherty budget as a whole.
 void RunLaunchBenchmark() {
-    constexpr int kDirectories = 5;
-    constexpr int kFilesPerDirectory = 100;
-    constexpr int kExpectedTracks = kDirectories * kFilesPerDirectory;
+    constexpr int kArtists = 5;
+    constexpr int kAlbumsPerArtist = 2;
+    constexpr int kTracksPerAlbum = 50;
+    constexpr int kExpectedTracks =
+        kArtists * kAlbumsPerArtist * kTracksPerAlbum;
 
     TempDir dir(CreateUniqueTempDir(L"kessoku_perf_launch_"));
     Check(dir.valid(), "create performance launch temp directory");
@@ -392,21 +469,12 @@ void RunLaunchBenchmark() {
         return;
     }
 
-    for (int d = 0; d < kDirectories; ++d) {
-        const std::wstring dirName = L"album_" + std::to_wstring(d);
-        if (!CreateSubdir(dir.path(), dirName)) {
-            Check(false, "create launch benchmark album directory");
-            return;
-        }
-        const std::wstring albumDir = dir.path() + L"\\" + dirName;
-        for (int f = 0; f < kFilesPerDirectory; ++f) {
-            const std::wstring path =
-                albumDir + L"\\track_" + std::to_wstring(f) + L".wav";
-            if (!WriteWavFile(path, 0)) {
-                Check(false, "create launch benchmark track");
-                return;
-            }
-        }
+    const bool libraryOk =
+        MakeTaggedLaunchLibrary(dir.path(), kArtists, kAlbumsPerArtist,
+                                kTracksPerAlbum);
+    Check(libraryOk, "build 500-track tagged launch library");
+    if (!libraryOk) {
+        return;
     }
 
     auto rootResult = kessoku::core::LibraryRoot::Create(dir.path());
@@ -424,7 +492,7 @@ void RunLaunchBenchmark() {
     }
 
     size_t indexed = 0;
-    Report("launch scan + metadata for 500 tracks", 3, [&] {
+    Report("launch scan + metadata for 500 tagged tracks", 3, [&] {
         const auto scan = kessoku::library::Scan(root);
         size_t readable = 0;
         for (const auto& file : scan.files) {
@@ -436,6 +504,60 @@ void RunLaunchBenchmark() {
     });
     Check(indexed == static_cast<size_t>(kExpectedTracks),
           "timed launch indexes every track");
+}
+
+// The declared library scale is 1,000-10,000 tracks (CLAUDE section 16.1).
+// At 1,000 tagged files this startup path exceeds the 400 ms Doherty budget
+// on the development machine, so this probe reports the real number instead
+// of hiding it behind a smaller fixture or a relaxed gate.
+void RunLaunchScaleProbe() {
+    constexpr int kArtists = 5;
+    constexpr int kAlbumsPerArtist = 4;
+    constexpr int kTracksPerAlbum = 50;
+    constexpr int kExpectedTracks =
+        kArtists * kAlbumsPerArtist * kTracksPerAlbum;
+
+    TempDir dir(CreateUniqueTempDir(L"kessoku_perf_launch_scale_"));
+    Check(dir.valid(), "create launch scale probe temp directory");
+    if (!dir.valid()) {
+        return;
+    }
+
+    const bool libraryOk =
+        MakeTaggedLaunchLibrary(dir.path(), kArtists, kAlbumsPerArtist,
+                                kTracksPerAlbum);
+    Check(libraryOk, "build 1,000-track tagged probe library");
+    if (!libraryOk) {
+        return;
+    }
+
+    auto rootResult = kessoku::core::LibraryRoot::Create(dir.path());
+    Check(rootResult.IsOk(), "create LibraryRoot for launch scale probe");
+    if (!rootResult.IsOk()) {
+        return;
+    }
+    const kessoku::core::LibraryRoot& root = rootResult.Value();
+
+    const auto initial = kessoku::library::Scan(root);
+    Check(initial.files.size() == static_cast<size_t>(kExpectedTracks),
+          "launch scale probe finds every track");
+    if (initial.files.size() != static_cast<size_t>(kExpectedTracks)) {
+        return;
+    }
+
+    size_t indexed = 0;
+    ReportProbe("startup at 1,000 tagged tracks", 3, [&] {
+        const auto scan = kessoku::library::Scan(root);
+        size_t readable = 0;
+        for (const auto& file : scan.files) {
+            if (kessoku::library::ReadTrackMetadata(root, file).IsOk()) {
+                ++readable;
+            }
+        }
+        indexed = readable;
+    });
+    Check(indexed == static_cast<size_t>(kExpectedTracks),
+          "scale probe indexes every track");
 }
 
 void RunContainmentBenchmark() {
@@ -670,6 +792,8 @@ int main() {
     RunMixedLibraryBenchmark();
     printf("\n");
     RunLaunchBenchmark();
+    printf("\n");
+    RunLaunchScaleProbe();
     printf("\n");
     RunContainmentBenchmark();
     printf("\n");

@@ -801,8 +801,8 @@ Do not repeatedly reopen settled decisions unless new evidence materially change
 
 **Decision:**
 
-- Release and RelWithDebInfo builds target this machine's AMD Ryzen 7 5700X (Zen 3) with MSVC's maximum-speed profile: `/O2 /Ob3 /Oi /Ot /Oy /GF /Gy /Gw /Zc:inline /arch:AVX2 /fp:fast`, plus `/GL` and `/LTCG /OPT:REF /OPT:ICF`. Debug and ASan builds stay unoptimized.
-- The project-local `x64-windows-native` vcpkg triplet applies the same Release tuning to dependency libraries, so the app and its dependency DLLs share one machine-specific code-generation profile.
+- Release and RelWithDebInfo builds target this machine's AMD Ryzen 7 5700X (Zen 3) with MSVC's maximum-speed profile: `/O2 /Ob3 /Oi /Ot /GF /Gy /Gw /Zc:inline /arch:AVX2 /fp:fast`, plus `/GL` and `/LTCG /OPT:REF /OPT:ICF`. Debug and ASan builds stay unoptimized.
+- The project-local `x64-windows-native` vcpkg triplet applies the same Release tuning to dependency libraries, including `/arch:AVX2` and `/fp:fast`, so the app and its dependency DLLs share one machine-specific code-generation profile.
 - Profile-guided optimization is opt-in through `KESSOKU_PGO=OFF|GENERATE|USE`, the `pgo-generate`/`pgo-use` presets, and `scripts/pgo.ps1`. Normal `default`/`release` builds are unchanged.
 - `scripts/pgo.ps1` trains the real `Kessoku.exe` and the dependency DLLs on a local scan/playback workload, merges the collected `.pgc` files, and relinks app and DLLs with `/USEPROFILE`. The `x64-windows-native-pgo` triplet adds `/GENPROFILE` to the dependency build.
 - PGO profiles, training media, and PGO build output stay in the gitignored `build-pgo/` tree and are never committed.
@@ -810,7 +810,7 @@ Do not repeatedly reopen settled decisions unless new evidence materially change
 **Reason:**
 
 - This is a single-machine personal player; targeting the owner's CPU is a confirmed requirement rather than a portability trade-off to hedge. AVX2 is the highest ISA level the Ryzen 7 5700X supports, and `/arch:AVX2` also allows FMA and BMI.
-- `/Ob3`, `/Gw`, `/Zc:inline`, `/GL`, and `/LTCG` let MSVC inline, fold, and discard code within the app and within each dependency library that `/O2` alone cannot reach. `/fp:fast` is safe because PCM is integer and the only floating-point work is the WASAPI buffer-duration calculation.
+- `/Ob3`, `/Gw`, `/Zc:inline`, `/GL`, and `/LTCG` let MSVC inline, fold, and discard code within the app and within each dependency library that `/O2` alone cannot reach. `/fp:fast` is safe because PCM is integer and the only floating-point work is the WASAPI buffer-duration calculation; the triplet also applies it to libFLAC, TagLib, zlib and libogg, and the Release bit-exact FLAC decode test exercises those builds.
 - PGO is intended to improve branch layout, inlining, and code placement using the real FLAC/WAV scan and playback paths. Training the app and dependency DLLs separately is necessary because each image has its own profile database, and most decode and tag work executes inside `FLAC.dll` and `tag.dll`.
 - Keeping PGO opt-in preserves simple, reproducible Debug/Release builds and avoids making the normal build depend on local training artifacts.
 

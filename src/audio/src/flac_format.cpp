@@ -77,8 +77,10 @@ std::string ParseFlacFormat(const std::wstring& path, FlacFormat& out) {
     out.totalSamples = si.total_samples;
 
     if (out.sampleRate == 0 || out.channelCount == 0 ||
-        out.bitsPerSample == 0) {
-        return "Invalid FLAC STREAMINFO block (zero field): " + utf8Path;
+        out.channelCount > 8 || out.bitsPerSample < 4 ||
+        out.bitsPerSample > 32) {
+        return "Invalid FLAC STREAMINFO block (field out of range): " +
+               utf8Path;
     }
     return {};
 }

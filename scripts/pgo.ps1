@@ -854,13 +854,26 @@ function Copy-OptimizedDependency {
 
 function Assert-NoPgoRuntime {
     $dumpbin = Get-DumpbinPath
+    $appPath = Join-Path $ReleaseDir 'Kessoku.exe'
+    if (-not (Test-Path -LiteralPath $appPath -PathType Leaf)) {
+        throw ("PGO runtime check: expected app binary is missing: {0}" -f $appPath)
+    }
+
     $files = @()
     foreach ($root in @($DependencyBin, $ReleaseDir,
             (Join-Path $BuildDir 'tests\Release'))) {
-        if (Test-Path $root) {
-            $files += @(Get-ChildItem $root -File |
+        if (Test-Path -LiteralPath $root) {
+            # Recurse: an unexpected subdirectory must not turn into a blind
+            # spot for the runtime check.
+            $files += @(Get-ChildItem -LiteralPath $root -Recurse -File |
                 Where-Object { $_.Extension -in '.exe', '.dll' })
         }
+    }
+    if ($files.Count -lt 2) {
+        throw ("PGO runtime check found only {0} binaries; expected Kessoku.exe plus deployed dependencies." -f $files.Count)
+    }
+    if (-not ($files | Where-Object { $_.FullName -eq $appPath })) {
+        throw ("PGO runtime check did not include {0}." -f $appPath)
     }
     foreach ($file in $files) {
         $output = & $dumpbin /dependents $file.FullName

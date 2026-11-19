@@ -965,6 +965,36 @@ void TestParserFuzz(const std::wstring& dir) {
     Check(true, "random parser fuzz corpus completes without crashing");
 }
 
+// A mutation may legitimately be accepted or rejected, but each result must
+// stay inside its declared contract. Accepted values must describe a
+// self-consistent format, and rejections must carry a reason.
+bool WavInfoIsConsistent(const kessoku::audio::WavFileInfo& info,
+                         size_t fileSize) {
+    const auto& format = info.format;
+    if (format.sampleRate == 0 || format.channelCount == 0 ||
+        format.bitsPerSample == 0) {
+        return false;
+    }
+    if (format.bitsPerSample != 8 && format.bitsPerSample != 16 &&
+        format.bitsPerSample != 24 && format.bitsPerSample != 32) {
+        return false;
+    }
+    if (format.channelCount > 8) {
+        return false;
+    }
+    if (format.blockAlign !=
+        format.channelCount * (format.bitsPerSample / 8)) {
+        return false;
+    }
+    return info.dataOffset + info.dataSize <= fileSize;
+}
+
+bool FlacFormatIsConsistent(const kessoku::audio::FlacFormat& format) {
+    return format.sampleRate != 0 && format.channelCount > 0 &&
+           format.channelCount <= 8 && format.bitsPerSample >= 4 &&
+           format.bitsPerSample <= 32;
+}
+
 // Deterministic truncation and single-byte mutation sweeps over structurally
 // valid files. Random fuzz mostly fails at the signature check; these cases
 // reach the chunk/STREAMINFO parsers with one plausible field corrupted.
@@ -1008,75 +1038,149 @@ void TestTruncationAndMutationSweep(const std::wstring& dir) {
     }
     Check(sweepOk, "FLAC truncation sweep completes without crashing");
 
-    const uint8_t mutations[] = {0x00, 0xFF};
+    // Header mutation sweep. Every mutation must yield a classified result:
+    // an accepted file with a self-consistent format, or a rejection with a
+    // non-empty error. Mutating a fixed signature or chunk identifier can
+    // only ever be a rejection, so those offsets are asserted explicitly.
+    const uint8_t mutations[] = {0x00, 0x01, 0x7F, 0x80, 0xFE, 0xFF};
+    constexpr size_t kMutationCount =
+        sizeof(mutations) / sizeof(mutations[0]);
+
     bool mutationOk = true;
-    const size_t wavMutationBytes = std::min<size_t>(wavBytes.size(), 96);
+    size_t mutationsRun = 0;
+    const size_t wavMutationBytes = std::min<size_t>(wavBytes.size(), 256);
     for (size_t offset = 0; offset < wavMutationBytes && mutationOk; ++offset) {
         for (const uint8_t mutation : mutations) {
+            ++mutationsRun;
             std::vector<uint8_t> bytes = wavBytes;
             bytes[offset] = mutation;
             if (!WriteBytes(wavSweepPath, bytes)) {
                 mutationOk = false;
                 break;
             }
-            kessoku::audio::WavFormat format{};
-            (void)ParseWav(wavSweepPath, format);
+
+            const bool structuralId =
+                offset < 4 || (offset >= 8 && offset < 16) ||
+                (offset >= 36 && offset < 40);
+            kessoku::audio::WavFileInfo info{};
+            std::string error;
+            const auto validation =
+                kessoku::audio::ParseWavFile(wavSweepPath, info, error);
+
+            if (structuralId) {
+                if (validation == kessoku::audio::WavValidation::Ok) {
+                    mutationOk = false;
+                    break;
+                }
+            }
+            if (validation == kessoku::audio::WavValidation::Ok) {
+                if (!WavInfoIsConsistent(info, bytes.size())) {
+                    mutationOk = false;
+                    break;
+                }
+            } else if (error.empty()) {
+                mutationOk = false;
+                break;
+            }
         }
     }
-    Check(mutationOk, "WAV header mutation sweep completes without crashing");
+    Check(mutationOk,
+          "WAV validator mutation sweep classifies every result");
+    Check(mutationsRun == wavMutationBytes * kMutationCount,
+          "WAV validator mutation sweep runs every planned mutation");
 
     mutationOk = true;
-    const size_t flacMutationBytes = std::min<size_t>(flacBytes.size(), 96);
+    mutationsRun = 0;
+    const size_t flacMutationBytes = std::min<size_t>(flacBytes.size(), 256);
     for (size_t offset = 0; offset < flacMutationBytes && mutationOk;
          ++offset) {
         for (const uint8_t mutation : mutations) {
+            ++mutationsRun;
             std::vector<uint8_t> bytes = flacBytes;
             bytes[offset] = mutation;
             if (!WriteBytes(flacSweepPath, bytes)) {
                 mutationOk = false;
                 break;
             }
+
             kessoku::audio::FlacFormat format{};
-            (void)kessoku::audio::ParseFlacFormat(flacSweepPath, format);
+            const std::string error =
+                kessoku::audio::ParseFlacFormat(flacSweepPath, format);
+            if (error.empty()) {
+                if (offset < 4 || !FlacFormatIsConsistent(format)) {
+                    mutationOk = false;
+                    break;
+                }
+            }
         }
     }
-    Check(mutationOk, "FLAC header mutation sweep completes without crashing");
+    Check(mutationOk, "FLAC parser mutation sweep classifies every result");
+    Check(mutationsRun == flacMutationBytes * kMutationCount,
+          "FLAC parser mutation sweep runs every planned mutation");
 
-    // Metadata readers must also fail cleanly for mutated headers. Limit the
-    // sweep to the header bytes so TagLib log noise and runtime stay bounded.
+    // Metadata readers must fail cleanly for mutated headers, and every
+    // failure must carry an error message for the caller to surface. The
+    // sweep covers the reserved and structural bytes plus the first metadata
+    // block, where TagLib and the shared WAV validator do their work.
     mutationOk = true;
-    const size_t wavMetadataBytes = std::min<size_t>(wavBytes.size(), 24);
+    mutationsRun = 0;
+    const size_t wavMetadataBytes = std::min<size_t>(wavBytes.size(), 128);
     for (size_t offset = 0; offset < wavMetadataBytes && mutationOk;
          ++offset) {
         for (const uint8_t mutation : mutations) {
+            ++mutationsRun;
             std::vector<uint8_t> bytes = wavBytes;
             bytes[offset] = mutation;
             if (!WriteBytes(wavSweepPath, bytes)) {
                 mutationOk = false;
                 break;
             }
-            (void)kessoku::library::ReadTrackMetadata(wavSweepPath);
+            const auto result =
+                kessoku::library::ReadTrackMetadata(wavSweepPath);
+            if (result.IsErr() && result.GetError().message.empty()) {
+                mutationOk = false;
+                break;
+            }
+            if (offset < 4 && result.IsOk()) {
+                mutationOk = false;
+                break;
+            }
         }
     }
     Check(mutationOk,
-          "WAV metadata mutation sweep completes without crashing");
+          "WAV metadata mutation sweep rejects bad signatures with a reason");
+    Check(mutationsRun == wavMetadataBytes * kMutationCount,
+          "WAV metadata mutation sweep runs every planned mutation");
 
     mutationOk = true;
-    const size_t flacMetadataBytes = std::min<size_t>(flacBytes.size(), 24);
+    mutationsRun = 0;
+    const size_t flacMetadataBytes = std::min<size_t>(flacBytes.size(), 128);
     for (size_t offset = 0; offset < flacMetadataBytes && mutationOk;
          ++offset) {
         for (const uint8_t mutation : mutations) {
+            ++mutationsRun;
             std::vector<uint8_t> bytes = flacBytes;
             bytes[offset] = mutation;
             if (!WriteBytes(flacSweepPath, bytes)) {
                 mutationOk = false;
                 break;
             }
-            (void)kessoku::library::ReadTrackMetadata(flacSweepPath);
+            const auto result =
+                kessoku::library::ReadTrackMetadata(flacSweepPath);
+            if (result.IsErr() && result.GetError().message.empty()) {
+                mutationOk = false;
+                break;
+            }
+            if (offset < 4 && result.IsOk()) {
+                mutationOk = false;
+                break;
+            }
         }
     }
     Check(mutationOk,
-          "FLAC metadata mutation sweep completes without crashing");
+          "FLAC metadata mutation sweep rejects bad signatures with a reason");
+    Check(mutationsRun == flacMetadataBytes * kMutationCount,
+          "FLAC metadata mutation sweep runs every planned mutation");
 }
 
 } // namespace

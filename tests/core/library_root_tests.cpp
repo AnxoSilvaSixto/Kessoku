@@ -87,8 +87,10 @@ bool CreateJunction(std::wstring_view junctionPath,
 }
 
 // Create a symbolic link at symlinkPath pointing to targetPath.
-// Uses SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE (0x2) so it works
-// without Developer Mode on Windows 10+ (build 14931+).
+// SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE opts into unprivileged
+// creation, but Windows still requires Developer Mode or the
+// SeCreateSymbolicLinkPrivilege; without one, creation fails and the caller
+// reports a skip.
 bool CreateSymlink(std::wstring_view symlinkPath,
                    std::wstring_view targetPath) {
     std::wstring sPath(symlinkPath);
@@ -107,6 +109,11 @@ bool StringStartsWith(std::wstring_view haystack, std::wstring_view needle) {
 }
 
 int gFailures = 0;
+
+// Volatile so the optimizer cannot prove the intentionally throwing move
+// constructor always throws and diagnose the Result code after it as
+// unreachable.
+volatile bool gThrowOnPayloadMove = true;
 
 void Check(bool condition, const char* testName, const char* desc,
            int line) {
@@ -229,7 +236,9 @@ int main() {
         } else {
             DWORD gle = GetLastError();
             if (gle == ERROR_PRIVILEGE_NOT_HELD) {
-                printf("SKIP: junction test (requires elevation/Dev Mode)\n");
+                // mklink /J normally needs neither elevation nor Developer
+                // Mode, so this only records an environment refusal.
+                printf("SKIP: junction test (environment refused mklink /J)\n");
             } else {
                 printf("SKIP: could not create junction\n");
             }
@@ -487,7 +496,9 @@ int main() {
         struct ThrowingPayload {
             ThrowingPayload() = default;
             ThrowingPayload(ThrowingPayload&&) {
-                throw std::runtime_error("payload move failed");
+                if (gThrowOnPayloadMove) {
+                    throw std::runtime_error("payload move failed");
+                }
             }
         };
         bool threw = false;

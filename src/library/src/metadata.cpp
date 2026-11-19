@@ -1,5 +1,6 @@
 #include "kessoku/library/metadata.h"
 
+#include "kessoku/audio/flac_format.h"
 #include "kessoku/audio/wav_format.h"
 #include "kessoku/core/error.h"
 #include "kessoku/core/library_root.h"
@@ -125,6 +126,32 @@ bool HasFlacStreamMarker(const std::filesystem::path& filePath) {
            std::memcmp(magic, "fLaC", 4) == 0;
 }
 
+// Mirror the player's FLAC acceptance gates, not just the stream marker:
+// libFLAC can open a FLAC whose STREAMINFO declares a bit depth this player
+// has no exact PCM container for. Listing it would guarantee a failure at the
+// first click, so the library applies the same range and container checks as
+// Player::Create.
+bool IsPlayableFlac(const std::filesystem::path& filePath) {
+    if (!HasFlacStreamMarker(filePath)) {
+        return false;
+    }
+    kessoku::audio::FlacFormat format{};
+    if (!kessoku::audio::ParseFlacFormat(filePath.wstring(), format).empty()) {
+        return false;
+    }
+    if (format.bitsPerSample != 8 && format.bitsPerSample != 16 &&
+        format.bitsPerSample != 24 && format.bitsPerSample != 32) {
+        return false;
+    }
+    if (format.channelCount == 0 || format.channelCount > 8) {
+        return false;
+    }
+    if (format.totalSamples == 0 || format.totalSamples > UINT32_MAX) {
+        return false;
+    }
+    return true;
+}
+
 // The player's own WAV validator, not a shallower copy. A .wav may only be
 // listed when it has the RIFF/WAVE signature, PCM fmt fields, consistent
 // block alignment, a data chunk whose declared range fits inside the file,
@@ -163,7 +190,8 @@ core::Result<TrackMetadata> ReadTrackMetadataImpl(
     // Validate the container before TagLib parses it. A .wav path with a
     // bogus header must not make the library parse arbitrary chunks, a
     // signature-only file must not report success with empty metadata, and a
-    // .flac without the stream marker must not list a track libFLAC refuses.
+    // .flac whose STREAMINFO is unreadable or not playable must not list a
+    // track Player::Create would refuse.
     if (IsWavFile(filePath) && !IsPlayableWav(filePath)) {
         return core::Result<TrackMetadata>::Err(
             core::ErrorCode::UnknownError,
@@ -171,7 +199,7 @@ core::Result<TrackMetadata> ReadTrackMetadataImpl(
                 core::WideToUtf8(filePath.wstring())
         );
     }
-    if (IsFlacFile(filePath) && !HasFlacStreamMarker(filePath)) {
+    if (IsFlacFile(filePath) && !IsPlayableFlac(filePath)) {
         return core::Result<TrackMetadata>::Err(
             core::ErrorCode::UnknownError,
             "Could not open or parse file: " +

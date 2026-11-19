@@ -34,15 +34,21 @@ The executable lands in `build\Debug\Kessoku.exe`. Run it from
 `build\Debug` so the vcpkg-deployed DLLs resolve.
 
 Release and RelWithDebInfo builds are tuned for this machine's Zen 3 CPU:
-MSVC uses `/arch:AVX2` (which also enables FMA and BMI), `/Ob3`, `/Gw`, and
-`/Zc:inline`, with `/GL` + `/LTCG` whole-program optimization and a
+MSVC uses `/O2 /Ob3 /Oi /Ot /GF /Gy /Gw /Zc:inline /arch:AVX2 /fp:fast`,
+with `/GL` + `/LTCG /OPT:REF /OPT:ICF` whole-program optimization and a
 non-incremental linker. The resulting binaries require an AVX2-capable CPU;
 they are not portable to older x64 hardware. Release builds can additionally
 consume a local profile-guided optimization database (see below).
 
+The app-side `/arch:AVX2` and `/fp:fast` flags live in `CMakeLists.txt`. A
+build for a different CPU must change those flags as well as use a matching
+vcpkg triplet; the project-local triplet mirrors the app flags for the
+dependencies.
+
 `player_tests` opens the default output device in WASAPI Exclusive Mode. Run
-one audio test suite at a time: two `ctest` invocations in parallel (for
-example, Debug and Release) contend for the same endpoint and one will fail.
+one audio test suite at a time: parallel `ctest` invocations contend for the
+same endpoint, and the later run reports device-unavailable SKIPs instead of
+exercising playback.
 
 ### Tests and benchmarks
 
@@ -50,9 +56,12 @@ example, Debug and Release) contend for the same endpoint and one will fail.
 `scanner_tests`, `metadata_tests`, `player_tests`, `transport_position_tests`,
 `format_tests`, and `performance_tests`.
 
-`format_tests` feeds malformed, truncated, and deterministically random
+`format_tests` feeds malformed, truncated, and deterministically mutated
 WAV/FLAC/metadata inputs through the parsers and checks that content/extension
-mismatches fail cleanly instead of reporting empty metadata. It also covers
+mismatches fail cleanly instead of reporting empty metadata. Mutation sweeps
+assert an outcome class for every case (accepted with a self-consistent
+format, or rejected with a non-empty error) across a widened byte/offset
+window, rather than only checking that nothing crashed. The suite also covers
 boundary conditions such as case-sensitive RIFF chunk IDs, zero-size chunks,
 the exact 1 MB `fmt` allocation cap, and FLAC STREAMINFO sample-rate limits.
 
@@ -61,15 +70,27 @@ unsupported bit depths and channel layouts, unknown FLAC sample counts, and
 WAV files with no data chunk, so those cases fail before touching audio
 hardware.
 
-`performance_tests` times complete user-visible workloads: scanning 2,000
-files, scanning a mixed 2,000-file library that contains only 500 audio
-tracks, scanning and reading metadata for a 500-track library at launch, 2,000
-containment checks, 100 WAV and FLAC metadata reads, opening and decoding a
-10-second FLAC, rejecting 200 malformed WAV files, transport conversions, time
-formatting, and UTF-8 path round-trips. Each scenario is warmed up, measured
-three times, and held to the 400 ms Doherty Threshold. AddressSanitizer builds
+`performance_tests` times library and decode workloads: scanning 2,000 files,
+scanning a mixed 2,000-file library that contains 500 audio tracks,
+scan-plus-metadata startup for a 500-track artist/album tree with RIFF INFO
+tags and non-audio sidecars, 2,000 containment checks, 100 WAV and FLAC
+metadata reads, opening and decoding a 10-second FLAC, rejecting 200 malformed
+WAV files, and hot helper loops for transport conversions, time formatting,
+and UTF-8 path round-trips. Budgeted scenarios are warmed up, measured three
+times, and held to the 400 ms Doherty Threshold. AddressSanitizer builds
 execute the same workloads but do not enforce wall-clock budgets, because
 sanitizer instrumentation changes timing rather than application behavior.
+Measurements are warm-cache and cover the scan/parse path, not UI row painting
+or audio-device initialization.
+
+A separate informational probe runs the same startup path over 1,000 tagged
+tracks, the declared lower bound of the expected library scale. It prints the
+measured time without a budget: on the development machine it is roughly
+0.5 seconds in Release and 0.7 seconds in Debug, so the 400 ms target is met
+at 500 tracks but not at 1,000.
+
+The repository has no CI configuration. Every build, test, and timing result
+in this README is a local run on the development machine, not a CI artifact.
 
 ### Presets
 
@@ -84,9 +105,13 @@ sanitizer instrumentation changes timing rather than application behavior.
 
 The `default` and `compile-commands` presets use the project-local
 `triplets\x64-windows-native.cmake` vcpkg triplet, which builds Release
-dependencies with the same AVX2 and maximum-speed profile as the app. That
-triplet is specific to this machine's CPU; a different CPU needs its own
-triplet (or the stock `x64-windows` one).
+dependencies with the same `/arch:AVX2` and `/fp:fast` tuning as the app. That
+triplet and the app flags are specific to this machine's CPU; a different CPU
+needs both a matching triplet and a change to the app-side `/arch:AVX2` and
+`/fp:fast` flags in `CMakeLists.txt` (or the stock `x64-windows` triplet plus
+those flag changes). `/fp:fast` therefore covers libFLAC, TagLib, zlib and
+libogg as well as first-party code; the Release bit-exact FLAC decode test is
+the check that those optimized dependency builds still produce identical PCM.
 
 ### Profile-guided optimization
 
@@ -147,11 +172,17 @@ whole tree.
 ## Layout
 
 ```
-src/core      Result/Error types, library-root containment, UTF-8 helpers
-src/audio     WASAPI Exclusive playback, FLAC and WAV decoding
-src/library   Library scanning and tag reading
-src/main.cpp  Win32 + WTL window and transport controls
-tests/        CTest executables (no external test framework)
+src/core                  Result/Error types, library-root containment, UTF-8 helpers
+src/audio                 WASAPI Exclusive playback, FLAC and WAV decoding
+src/library               Library scanning and tag reading
+src/main.cpp              Win32 + WTL window and transport controls
+src/transport_position.h  Integer frame/bar/time mapping shared with the UI tests
+tests/                    CTest executables (no external framework)
+tests/shared/             Shared test helpers and temporary-directory utilities
+scripts/                  Environment setup and PGO automation
+triplets/                 Project-local vcpkg triplets
+tools/vcpkg-query/        Offline vcpkg registry query helper
+.opencode/                Agent skills and project configuration (opencode.json)
 ```
 
 ## Invariants

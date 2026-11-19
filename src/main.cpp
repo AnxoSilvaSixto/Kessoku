@@ -673,6 +673,7 @@ void RunScanAndPost(HWND hWnd, kessoku::core::LibraryRoot root)
             }
         }
     } catch (const std::exception& ex) {
+        (void)ex;
 #if defined(_DEBUG)
         OutputDebugStringA("Kessoku: scan failed: ");
         OutputDebugStringA(ex.what());
