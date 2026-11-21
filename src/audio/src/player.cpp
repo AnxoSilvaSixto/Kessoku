@@ -191,8 +191,40 @@ void Player::AssertCallingThread() const noexcept {
 }
 
 core::Result<Player> Player::Create(std::wstring_view wavPath) {
+    return CreateImpl(wavPath, nullptr);
+}
+
+core::Result<Player> Player::Create(const core::LibraryRoot& root,
+                                    std::wstring_view wavPath) {
+    return CreateImpl(wavPath, &root);
+}
+
+core::Result<Player> Player::CreateImpl(std::wstring_view wavPath,
+                                        const core::LibraryRoot* root) {
     const bool isFlac = HasFlacExtension(wavPath);
     const char* formatKind = isFlac ? "FLAC" : "WAV";
+
+    // Bind the containment decision and every later read to one handle.
+    // OpenContained resolves the final path from the handle it just opened
+    // and keeps that handle, so a junction or symlink swapped in after the
+    // check cannot redirect parsing or playback.
+    core::Result<core::FileHandle> opened =
+        root != nullptr ? core::FileHandle::OpenContained(*root, wavPath)
+                        : core::FileHandle::Open(wavPath);
+    if (opened.IsErr()) {
+        const core::Error& error = opened.GetError();
+        if (error.code == core::ErrorCode::InvalidPath) {
+            return core::Result<Player>::Err(error.code, error.message);
+        }
+        // Preserve the pre-handle public behavior for unreadable input:
+        // format/parse failures are AudioInitFailed, not a new error
+        // taxonomy for callers to learn.
+        return core::Result<Player>::Err(
+            core::ErrorCode::AudioInitFailed,
+            std::string(formatKind) + " format parse failed: " +
+                error.message);
+    }
+    core::FileHandle source = std::move(opened.Value());
 
     WavFormat fileFormat{};
     FlacFormat flacFormat{};
@@ -203,8 +235,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
     uint64_t dataChunkSize = 0;
 
     if (isFlac) {
-        std::string parseError =
-            ParseFlacFormat(std::wstring(wavPath), flacFormat);
+        std::string parseError = ParseFlacFormat(source.get(), flacFormat);
         if (!parseError.empty()) {
             return core::Result<Player>::Err(
                 core::ErrorCode::AudioInitFailed,
@@ -252,7 +283,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
         WavFileInfo wavInfo{};
         std::string parseError;
         const WavValidation validation =
-            ParseWavFile(std::wstring(wavPath), wavInfo, parseError);
+            ParseWavFile(source.get(), wavInfo, parseError);
         if (validation != WavValidation::Ok) {
             return core::Result<Player>::Err(
                 validation == WavValidation::Unsupported
@@ -559,7 +590,7 @@ core::Result<Player> Player::Create(std::wstring_view wavPath) {
     // Data chunk offset/size (WAV) were validated above, before any audio
     // setup; FLAC total frames come from STREAMINFO and decoding starts at
     // the stream head.
-    Player player(std::wstring(wavPath), fileFormat, totalFrames, sourceKind,
+    Player player(std::move(source), fileFormat, totalFrames, sourceKind,
                   flacFormat);
     player.pEnumerator_ = pEnumerator;
     player.pDevice_ = pDevice;
@@ -1111,11 +1142,17 @@ void Player::OpenWavFile() {
         hFile_ = nullptr;
     }
 
-    void* newFile = CreateFileW(
-        wavPath_.c_str(), GENERIC_READ, FILE_SHARE_READ,
-        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    void* newFile = nullptr;
+    HANDLE duplicate = nullptr;
+    if (source_.IsValid() &&
+        DuplicateHandle(GetCurrentProcess(),
+                        static_cast<HANDLE>(source_.get()),
+                        GetCurrentProcess(), &duplicate, 0, FALSE,
+                        DUPLICATE_SAME_ACCESS)) {
+        newFile = duplicate;
+    }
 
-    if (newFile == INVALID_HANDLE_VALUE) {
+    if (newFile == nullptr) {
         hFile_ = nullptr;
         audioError_ = false;
         return;
@@ -1140,7 +1177,7 @@ void Player::OpenFlacFile() {
     // concurrent Seek() serializes after the open instead of seeking a
     // decoder that is about to be replaced.
     std::lock_guard<std::mutex> lock(positionMutex_);
-    flacReader_.Open(wavPath_, flacFormat_, currentFrame_);
+    flacReader_.Open(source_.get(), flacFormat_, currentFrame_);
     audioError_ = false;
 }
 

@@ -83,11 +83,10 @@ sanitizer instrumentation changes timing rather than application behavior.
 Measurements are warm-cache and cover the scan/parse path, not UI row painting
 or audio-device initialization.
 
-A separate informational probe runs the same startup path over 1,000 tagged
-tracks, the declared lower bound of the expected library scale. It prints the
-measured time without a budget: on the development machine it is roughly
-0.5 seconds in Release and 0.7 seconds in Debug, so the 400 ms target is met
-at 500 tracks but not at 1,000.
+The same startup path is also budgeted over 1,000 tagged tracks, the declared
+lower bound of the expected library scale. On the development machine it is
+roughly 0.22 seconds in Release and 0.36 seconds in Debug, so the 400 ms
+target holds at both 500 and 1,000 tracks.
 
 The repository has no CI configuration. Every build, test, and timing result
 in this README is a local run on the development machine, not a CI artifact.
@@ -172,7 +171,7 @@ whole tree.
 ## Layout
 
 ```
-src/core                  Result/Error types, library-root containment, UTF-8 helpers
+src/core                  Result/Error types, handle-bound library-root containment, UTF-8 helpers
 src/audio                 WASAPI Exclusive playback, FLAC and WAV decoding
 src/library               Library scanning and tag reading
 src/main.cpp              Win32 + WTL window and transport controls

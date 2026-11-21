@@ -1,5 +1,7 @@
 #pragma once
 
+#include "kessoku/core/file_handle.h"
+#include "kessoku/core/library_root.h"
 #include "kessoku/core/result.h"
 #include "kessoku/audio/flac_format.h"
 #include "kessoku/audio/wav_format.h"
@@ -41,7 +43,7 @@ public:
           hEvent_(other.hEvent_),
           hWakeEvent_(other.hWakeEvent_),
           renderThread_(std::move(other.renderThread_)),
-          wavPath_(std::move(other.wavPath_)),
+          source_(std::move(other.source_)),
           hFile_(other.hFile_),
           dataChunkOffset_(other.dataChunkOffset_),
           dataChunkSize_(other.dataChunkSize_),
@@ -86,6 +88,14 @@ public:
     // Does NOT start playback.
     static core::Result<Player> Create(std::wstring_view wavPath);
 
+    // Same as above, but require the file to resolve inside `root`. The file
+    // is opened once and the containment decision is bound to that handle:
+    // all parsing and playback reads use the same file object, so replacing
+    // the path with a junction or symlink after the check cannot redirect
+    // them. Returns InvalidPath when the file resolves outside the root.
+    static core::Result<Player> Create(const core::LibraryRoot& root,
+                                       std::wstring_view wavPath);
+
     // Start playback from the current position.
     core::Status Play();
 
@@ -116,14 +126,19 @@ public:
     ~Player();
 
 private:
-    explicit Player(std::wstring wavPath, WavFormat format, uint32_t totalFrames,
-                    SourceKind sourceKind, FlacFormat flacFormat)
-        : wavPath_(std::move(wavPath)),
+    explicit Player(core::FileHandle source, WavFormat format,
+                    uint32_t totalFrames, SourceKind sourceKind,
+                    FlacFormat flacFormat)
+        : source_(std::move(source)),
           format_(format),
           flacFormat_(flacFormat),
           sourceKind_(sourceKind),
           totalFrames_(totalFrames),
           state_(PlaybackState::Stopped) {}
+
+    // Shared implementation. `root` is null for the path-only overload.
+    static core::Result<Player> CreateImpl(std::wstring_view wavPath,
+                                           const core::LibraryRoot* root);
 
     // Internal: render thread entry point (called by std::thread).
     void RenderThreadEntry();
@@ -177,9 +192,13 @@ private:
     // Render thread
     std::thread renderThread_;
 
+    // Validated source handle. Opened once by Create(); parsing and every
+    // later playback open duplicate this same handle, never the path, so
+    // the containment decision stays bound to the file object.
+    core::FileHandle source_;
+
     // WAV file
-    std::wstring wavPath_;
-    void* hFile_ = nullptr; // HANDLE to the WAV file
+    void* hFile_ = nullptr; // duplicated HANDLE to the WAV file
     uint64_t dataChunkOffset_ = 0;
     uint64_t dataChunkSize_ = 0;
     // Byte offset into the data chunk; mirrors currentFrame_ for WAV.

@@ -188,7 +188,14 @@ bool LibraryRoot::Contains(std::wstring_view candidate) const {
         return false;
     }
 
-    // Strip the \\?\ prefix.
+    return ContainsResolvedPath(resolved);
+}
+
+bool LibraryRoot::ContainsResolvedPath(std::wstring_view resolvedPath) const {
+    std::wstring resolved(resolvedPath);
+
+    // Strip the \\?\ prefix that GetFinalPathNameByHandleW returns with
+    // VOLUME_NAME_DOS. A raw path may also carry it.
     constexpr std::wstring_view kPrefix = LR"(\\?\)";
     if (StringStartsWithOrdinalIAscii(resolved, kPrefix)) {
         resolved.erase(0, kPrefix.size());

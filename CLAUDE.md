@@ -604,7 +604,9 @@ The library root is a security boundary.
 Any implementation that accesses files must make the following invariant obvious:
  
 > A runtime path must resolve inside the user-approved library root before the operation is allowed.
- 
+
+Bind the check to the operation: open the file once with `CreateFileW`, resolve its final path from that same handle with `GetFinalPathNameByHandleW`, compare the resolved path against the canonical root, and keep using that handle for parsing, metadata, and playback. A separate path-only check followed by a fresh open leaves a check-then-open window and is not sufficient.
+
 Pay particular attention to:
  
 - `..` traversal;

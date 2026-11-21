@@ -37,6 +37,12 @@ enum class WavValidation {
 // and its range must also be validated.
 std::string ParseWavFormat(const std::wstring& path, WavFormat& out);
 
+// Handle overloads. The handle must be open for reading and seekable; it is
+// not closed. Use these when the caller has already opened and validated the
+// file by handle (see core::FileHandle), so a path swap cannot redirect the
+// parse to a different file.
+std::string ParseWavFormat(void* handle, WavFormat& out);
+
 // Byte value that represents digital silence in interleaved PCM: 0x80 for
 // unsigned 8-bit samples, 0x00 for signed 16/24/32-bit containers. Used to
 // pad the tail of a partially filled render buffer.
@@ -50,6 +56,10 @@ uint8_t PcmSilenceByte(uint16_t bitsPerSample);
 // reach the list) and Player::Create (so the two cannot disagree).
 // On failure `error` explains the rejection; both failure kinds set it.
 WavValidation ParseWavFile(const std::wstring& path, WavFileInfo& out,
+                           std::string& error);
+
+// Handle overload; same validation, reading only from `handle`.
+WavValidation ParseWavFile(void* handle, WavFileInfo& out,
                            std::string& error);
 
 } // namespace kessoku::audio

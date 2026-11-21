@@ -326,23 +326,21 @@ private:
         // single-calling-thread contract.
         StopTrack();
 
-        // Play-time containment: the path resolved inside the library root
-        // at scan time, but the filesystem may have changed since (a
-        // junction or symlink swapped in after the scan resolves outside).
-        // Re-resolve as late as possible, after StopTrack's thread join and
-        // immediately before Player::Create opens the file. Contains() fails
-        // closed on missing files too, so the message must not claim which
-        // case refused the track. This narrows the check-then-open window;
-        // it does not bind the canonical handle to the parser.
-        if (!m_libraryRoot.has_value() ||
-            !m_libraryRoot->Contains(m_entries[index].first.native())) {
+        // Play-time containment is bound to the open file handle. Create()
+        // opens the file once, resolves the final path from that handle, and
+        // parses/reads from the same handle, so a junction or symlink
+        // swapped in after the scan cannot redirect playback. A containment
+        // failure comes back as InvalidPath and is reported like any other
+        // Create() error; there is no separate check-then-open window.
+        if (!m_libraryRoot.has_value()) {
             ::MessageBoxW(m_hWnd, L"The selected track cannot be played.",
                         L"Playback error", MB_OK | MB_ICONERROR);
             m_statusLabel.SetWindowTextW(L"Could not play selected track.");
             return;
         }
 
-        auto result = kessoku::audio::Player::Create(m_entries[index].first.native());
+        auto result = kessoku::audio::Player::Create(
+            *m_libraryRoot, m_entries[index].first.native());
         if (result.IsErr()) {
             const auto& err = result.GetError();
             ::MessageBoxW(m_hWnd, WidenErrorMessage(err.message).c_str(),
@@ -573,10 +571,11 @@ private:
     // exclusively on this window's UI thread.
     std::optional<kessoku::audio::Player> m_player;
 
-    // The validated library root from the successful folder pick. PlaySelected
-    // re-checks containment against it immediately before Player::Create(),
-    // so a path that escaped the root after the scan (junction/symlink swap,
-    // deletion) is refused instead of opened.
+    // The validated library root from the successful folder pick.
+    // Player::Create(root, path) opens the selected file once and binds the
+    // containment check to that handle, so a path that escaped the root
+    // after the scan (junction/symlink swap, deletion) is refused instead of
+    // opened, with no check-then-open window.
     std::optional<kessoku::core::LibraryRoot> m_libraryRoot;
 
     // True between TB_THUMBTRACK and TB_ENDTRACK: PollPlayer skips

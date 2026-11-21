@@ -13,9 +13,18 @@ struct FlacFormat {
     uint32_t channelCount = 0;
     uint32_t bitsPerSample = 0;
     uint64_t totalSamples = 0; // 0 means "unknown"
+    // Byte offset of the "fLaC" marker. Zero for a bare stream; non-zero
+    // when a leading ID3v2 tag was skipped. The decoder uses it to seek to
+    // the same bytes the format parser validated.
+    uint64_t streamOffset = 0;
 };
 
-// Read STREAMINFO via the libFLAC metadata API.
+// Read STREAMINFO from an already-open handle. The handle must be readable
+// and seekable; it is not closed. Returns an error message on failure.
+std::string ParseFlacFormat(void* handle, FlacFormat& out);
+
+// Path wrapper. Opens the path, then calls the handle overload. Used by
+// tests and by callers that already established containment.
 // Returns an error message on failure (empty string on success).
 std::string ParseFlacFormat(const std::wstring& path, FlacFormat& out);
 
@@ -52,7 +61,11 @@ public:
 
     // Open the file and consume metadata, then position at startSample
     // (sample-accurate seek; 0 = stream start). Closes any previous stream.
+    // The handle overload duplicates `handle` and reads only from that file
+    // object, so containment validated on the handle still holds here.
     // Returns an error message on failure (empty string on success).
+    std::string Open(void* handle, const FlacFormat& fmt,
+                     uint64_t startSample);
     std::string Open(const std::wstring& path, const FlacFormat& fmt,
                      uint64_t startSample);
 
@@ -86,11 +99,23 @@ public:
                           const int32_t* const* buffer);
     void FlagDecodeError();
 
+    // Handle-backed libFLAC I/O callbacks. Public only because C callbacks
+    // cannot be private members; not part of the usable API. The return
+    // values match the corresponding FLAC__StreamDecoder*Status enums.
+    int IoRead(uint8_t* buffer, size_t* bytes);
+    int IoSeek(uint64_t absoluteByteOffset);
+    int IoTell(uint64_t* absoluteByteOffset);
+    int IoLength(uint64_t* streamLength);
+    int IoEof();
+
 private:
     void CloseLocked();
     uint32_t FifoFramesLocked() const;
 
     void* decoder_ = nullptr; // FLAC__StreamDecoder*, guarded by mutex_
+    void* file_ = nullptr;    // duplicated HANDLE, guarded by mutex_
+    uint64_t streamOffset_ = 0;
+    uint64_t streamLength_ = 0;
     std::vector<uint8_t> fifo_;
     size_t fifoStart_ = 0;
     bool eof_ = false;

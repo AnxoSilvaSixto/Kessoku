@@ -9,7 +9,7 @@ A minimal, native Windows 11 music player. Browse/play/pause/seek FLAC and WAV f
 ## Hard invariants — never weaken, work around, or silently reinterpret these
 
 - **Offline only.** No runtime network calls, telemetry, analytics, crash uploads, cloud sync, accounts, license checks, or update checks. A dependency that phones home at runtime is disqualifying, not a config detail.
-- **Filesystem boundary.** Only the one user-selected library root and its descendants. Every runtime path must resolve *inside* that root before any file operation. See the `filesystem-security-boundary` skill before touching anything that opens, lists, or validates a path.
+- **Filesystem boundary.** Only the one user-selected library root and its descendants. Every runtime path must resolve *inside* that root before any file operation, and the containment decision must be bound to the open handle the operation reads through (`core::FileHandle::OpenContained`), not checked by path and then reopened. See the `filesystem-security-boundary` skill before touching anything that opens, lists, or validates a path.
 - **Audio.** WASAPI Exclusive Mode only. No silent fallback to shared mode. No resampling, normalization, DSP, mixing, crossfade, or ReplayGain. Bit-perfect is a requirement, not an aspiration. See the `audio-engine-wasapi` skill before touching anything under the audio engine.
 - **Formats.** FLAC and WAV only. DSD is deferred — do not add it, even partially, even behind a flag.
 - **Platform.** Windows 11 native only. Don't add cross-platform abstractions "just in case."

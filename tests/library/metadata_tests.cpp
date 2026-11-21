@@ -46,6 +46,18 @@ void Check(bool condition, const wchar_t* desc) {
     }
 }
 
+// Create a file symlink at linkPath pointing to targetPath. Windows still
+// requires Developer Mode or SeCreateSymbolicLinkPrivilege without the
+// unprivileged flag; callers report a skip when creation is refused.
+bool CreateFileSymlink(std::wstring_view linkPath,
+                       std::wstring_view targetPath) {
+    return CreateSymbolicLinkW(
+               std::wstring(linkPath).c_str(),
+               std::wstring(targetPath).c_str(),
+               SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != FALSE;
+}
+
+
 } // namespace
 
 #define CHECK(cond, desc) Check((cond), (desc))
@@ -811,7 +823,7 @@ int main() {
     printf("\n");
 
     // ================================================================
-    // Test 15: The LibraryRoot overload re-checks containment at open time
+    // Test 15: The LibraryRoot overload binds containment to the open handle
     // ================================================================
     {
         std::wstring rootDir = CreateTempDir(L"\\kessoku_meta_root_test");
@@ -836,10 +848,20 @@ int main() {
                 !outsidePath.empty()) {
                 const auto& libRoot = rootResult.Value();
 
+                // Tag the inside fixture so the read proves TagLib consumed
+                // metadata through the validated handle, not just that the
+                // path passed the boundary check.
+                StampWavDirect(insidePath, L"Inside Title", L"Inside Artist",
+                               L"Inside Album", 4);
+
                 auto inside = kessoku::library::ReadTrackMetadata(
                     libRoot, std::filesystem::path(insidePath));
                 CHECK(inside.IsOk(),
                       "root-checked metadata read accepts an inside file");
+                if (inside.IsOk()) {
+                    CHECK(inside.Value().title == L"Inside Title",
+                          "inside file tags are read through the handle");
+                }
 
                 auto outside = kessoku::library::ReadTrackMetadata(
                     libRoot, std::filesystem::path(outsidePath));
@@ -847,6 +869,63 @@ int main() {
                           outside.GetError().code ==
                               kessoku::core::ErrorCode::InvalidPath,
                       "root-checked metadata read rejects an outside file");
+
+                // A dot-dot path is resolved by the handle itself, so it
+                // cannot smuggle the outside file across the boundary.
+                const std::wstring outsideName =
+                    std::filesystem::path(outsideDir).filename().wstring();
+                auto traversal = kessoku::library::ReadTrackMetadata(
+                    libRoot,
+                    std::filesystem::path(rootDir + L"\\..\\" + outsideName +
+                                          L"\\outside.wav"));
+                Check(traversal.IsErr() &&
+                          traversal.GetError().code ==
+                              kessoku::core::ErrorCode::InvalidPath,
+                      "root-checked metadata read rejects ..-traversal");
+
+                // The same rule must hold for FLAC and for a reparse point
+                // inside the root that resolves outside it.
+                std::wstring insideFlac =
+                    CreateMinimalFlac(rootDir, L"inside.flac");
+                std::wstring outsideFlac =
+                    CreateMinimalFlac(outsideDir, L"outside.flac");
+                Check(!insideFlac.empty() && !outsideFlac.empty(),
+                      "FLAC containment fixtures created");
+                if (!insideFlac.empty()) {
+                    StampFlacTags(insideFlac, L"Inside FLAC", L"F", L"G", 2);
+                    auto flacInside = kessoku::library::ReadTrackMetadata(
+                        libRoot, std::filesystem::path(insideFlac));
+                    CHECK(flacInside.IsOk(),
+                          "root-checked metadata read accepts inside FLAC");
+                    if (flacInside.IsOk()) {
+                        CHECK(flacInside.Value().title == L"Inside FLAC",
+                              "inside FLAC tags are read through the handle");
+                    }
+                }
+                if (!outsideFlac.empty()) {
+                    auto flacOutside = kessoku::library::ReadTrackMetadata(
+                        libRoot, std::filesystem::path(outsideFlac));
+                    Check(flacOutside.IsErr() &&
+                              flacOutside.GetError().code ==
+                                  kessoku::core::ErrorCode::InvalidPath,
+                          "root-checked metadata read rejects outside FLAC");
+                }
+
+                const std::wstring linkPath =
+                    rootDir + L"\\outside_link.wav";
+                if (CreateFileSymlink(linkPath, outsidePath)) {
+                    auto linked = kessoku::library::ReadTrackMetadata(
+                        libRoot, std::filesystem::path(linkPath));
+                    Check(linked.IsErr() &&
+                              linked.GetError().code ==
+                                  kessoku::core::ErrorCode::InvalidPath,
+                          "root-checked metadata read rejects an outside "
+                          "symlink");
+                    DeleteFileW(linkPath.c_str());
+                } else {
+                    printf("SKIP: metadata symlink containment "
+                           "(requires Dev Mode or elevation)\n");
+                }
 
                 auto missing = kessoku::library::ReadTrackMetadata(
                     libRoot,

@@ -1,6 +1,7 @@
 #include "kessoku/audio/player.h"
 #include "kessoku/audio/flac_format.h"
 #include "kessoku/audio/wav_format.h"
+#include "kessoku/core/library_root.h"
 
 #include <windows.h>
 
@@ -1486,6 +1487,72 @@ void RunInvalidInputTests() {
     }
     DeleteFileW(upperGarbage.c_str());
 
+    // Handle-bound containment: Player::Create(root, path) opens the file
+    // once, resolves the final path from that handle, and parses from the
+    // same handle. Rejection therefore happens before COM/device setup and
+    // runs without audio hardware.
+    const std::wstring rootDir = dir + L"\\library_root";
+    const std::wstring outsideWav = dir + L"\\outside_valid.wav";
+    if (CreateDirectoryW(rootDir.c_str(), nullptr) ||
+        GetLastError() == ERROR_ALREADY_EXISTS) {
+        CHECK(CreateTestWav(outsideWav, 44100, 16, 2, 10),
+              "write valid WAV outside the library root");
+        auto rootResult = kessoku::core::LibraryRoot::Create(rootDir);
+        CHECK(rootResult.IsOk(), "LibraryRoot created for player test");
+        if (rootResult.IsOk()) {
+            auto outside = kessoku::audio::Player::Create(
+                rootResult.Value(), outsideWav);
+            Check(outside.IsErr() &&
+                      outside.GetError().code ==
+                          kessoku::core::ErrorCode::InvalidPath,
+                  "Player::Create(root, path) rejects a file outside root",
+                  __func__, __LINE__);
+
+            // A reparse point inside the root that resolves outside must
+            // fail the handle's final-path check, not just the spelling.
+            const std::wstring linkPath = rootDir + L"\\outside_link.wav";
+            if (CreateSymbolicLinkW(
+                    linkPath.c_str(), outsideWav.c_str(),
+                    SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+                auto linked = kessoku::audio::Player::Create(
+                    rootResult.Value(), linkPath);
+                Check(linked.IsErr() &&
+                          linked.GetError().code ==
+                              kessoku::core::ErrorCode::InvalidPath,
+                      "Player::Create(root, path) rejects an outside symlink",
+                      __func__, __LINE__);
+                DeleteFileW(linkPath.c_str());
+            } else {
+                printf("SKIP: player symlink containment "
+                       "(requires Dev Mode or elevation)\n");
+            }
+
+            // The same overload accepts an inside file; past format parsing
+            // the result depends on the machine's exclusive-mode device.
+            const std::wstring insideWav = rootDir + L"\\inside.wav";
+            CHECK(CreateTestWav(insideWav, 44100, 16, 2, 10),
+                  "write valid WAV inside the library root");
+            auto inside = kessoku::audio::Player::Create(
+                rootResult.Value(), insideWav);
+            if (inside.IsErr() &&
+                IsEnvironmentSkipCode(inside.GetError().code)) {
+                printf("SKIP: player root-overload playback "
+                       "(no compatible exclusive-mode audio device)\n");
+            } else {
+                Check(inside.IsOk(),
+                      "Player::Create(root, path) accepts an inside file",
+                      __func__, __LINE__);
+                if (inside.IsOk()) {
+                    (void)inside.Value().Stop();
+                }
+            }
+        }
+        DeleteFileW(outsideWav.c_str());
+    } else {
+        printf("SKIP: player containment tests "
+               "(could not create directory)\n");
+    }
+
     RemoveDirectoryW(dir.c_str());
 }
 
@@ -2016,7 +2083,12 @@ int main() {
                     DeleteFileW(garbage.data());
                 }
 
-                // Case B: valid FLAC header truncated mid-stream.
+                // Case B: valid FLAC marker but truncated inside STREAMINFO.
+                // 32 bytes is past the "fLaC" marker and block header but
+                // short of the 34-byte STREAMINFO payload, so Create fails
+                // at format parsing on every machine. Truncating later in
+                // the stream would only fail during decoding, which depends
+                // on whether exclusive-mode hardware accepted the format.
                 std::wstring full = tempDir + L"\\full.flac";
                 if (CreateTestFlac(full, 44100, 16, 2, 44100)) {
                     std::wstring truncated = tempDir + L"\\truncated.flac";
@@ -2028,7 +2100,7 @@ int main() {
                         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
                     if (hSrc != INVALID_HANDLE_VALUE &&
                         hDst != INVALID_HANDLE_VALUE) {
-                        uint8_t head[64]{};
+                        uint8_t head[32]{};
                         DWORD bytesRead = 0;
                         if (ReadFile(hSrc, head, sizeof(head), &bytesRead,
                                      nullptr) &&

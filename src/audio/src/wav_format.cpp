@@ -2,11 +2,12 @@
 
 #include "kessoku/core/utf8.h"
 
+#define NOMINMAX
+#include <windows.h>
+
 #include <cstdio>
 #include <cstring>
-#include <fstream>
 #include <string>
-#include <vector>
 
 namespace kessoku::audio {
 
@@ -59,20 +60,48 @@ struct ParsedWav {
     bool hasData = false;
 };
 
+bool ReadAt(HANDLE file, uint64_t offset, void* buffer, DWORD bytes) {
+    LARGE_INTEGER position{};
+    position.QuadPart = static_cast<LONGLONG>(offset);
+    if (!SetFilePointerEx(file, position, nullptr, FILE_BEGIN)) {
+        return false;
+    }
+
+    DWORD read = 0;
+    return ReadFile(file, buffer, bytes, &read, nullptr) != FALSE &&
+           read == bytes;
+}
+
+bool FileSize(HANDLE file, uint64_t& out) {
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0) {
+        return false;
+    }
+    out = static_cast<uint64_t>(size.QuadPart);
+    return true;
+}
+
 // Walk the RIFF chunk list starting at byte 12. With requireData=false the
-// walk stops at the first valid fmt chunk, which is ParseWavFormat's
+// walk stops at the first valid fmt chunk, which ParseWavFormat's
 // historical contract. With requireData=true it continues until the data
 // chunk is found so both headers and the declared payload range can be
 // checked against the actual file size in one pass.
-std::string ParseWavChunks(const std::wstring& path, bool requireData,
-                           ParsedWav& out) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file.is_open()) {
-        return "Could not open WAV file: " + core::WideToUtf8(path);
+//
+// The caller owns `file`; this function only seeks and reads. Reading from
+// the already-validated handle is what binds the containment decision to the
+// bytes that are parsed.
+std::string ParseWavChunks(HANDLE file, bool requireData, ParsedWav& out) {
+    if (file == nullptr || file == INVALID_HANDLE_VALUE) {
+        return "Could not open WAV file";
+    }
+
+    uint64_t fileEnd = 0;
+    if (!FileSize(file, fileEnd)) {
+        return "Invalid WAV file: cannot determine file size";
     }
 
     RiffHeader riffHeader;
-    if (!file.read(reinterpret_cast<char*>(&riffHeader), sizeof(riffHeader))) {
+    if (!ReadAt(file, 0, &riffHeader, sizeof(riffHeader))) {
         return "Invalid WAV file: cannot read RIFF header";
     }
 
@@ -84,34 +113,24 @@ std::string ParseWavChunks(const std::wstring& path, bool requireData,
     // The RIFF size field is routinely wrong in the wild, so it is not
     // trusted. The actual stream length is what every chunk range is checked
     // against instead.
-    file.seekg(0, std::ios::end);
-    const std::streamoff fileEnd = static_cast<std::streamoff>(file.tellg());
-    if (fileEnd < static_cast<std::streamoff>(sizeof(RiffHeader))) {
-        return "Invalid WAV file: cannot determine file size";
-    }
-    file.seekg(static_cast<std::streamoff>(sizeof(RiffHeader)),
-               std::ios::beg);
-
+    uint64_t cursor = sizeof(RiffHeader);
     while (true) {
-        const std::streamoff chunkStart =
-            static_cast<std::streamoff>(file.tellg());
-        if (chunkStart < 0) {
-            return "Invalid WAV file: cannot locate chunk";
-        }
-        if (chunkStart == fileEnd) {
+        if (cursor == fileEnd) {
             break; // clean end of file between chunks
+        }
+        if (cursor > fileEnd) {
+            return "Invalid WAV file: cannot locate chunk";
         }
 
         ChunkHeader chunk;
-        if (!file.read(reinterpret_cast<char*>(&chunk), sizeof(chunk))) {
+        if (!ReadAt(file, cursor, &chunk, sizeof(chunk))) {
             return "Invalid WAV file: cannot read chunk header";
         }
 
-        const uint64_t payloadStart =
-            static_cast<uint64_t>(chunkStart) + sizeof(ChunkHeader);
+        const uint64_t payloadStart = cursor + sizeof(ChunkHeader);
         const uint64_t payloadEnd =
             payloadStart + static_cast<uint64_t>(chunk.size);
-        if (payloadEnd > static_cast<uint64_t>(fileEnd)) {
+        if (payloadEnd > fileEnd) {
             return "Invalid WAV file: chunk extends beyond end of file";
         }
 
@@ -128,7 +147,7 @@ std::string ParseWavChunks(const std::wstring& path, bool requireData,
             }
 
             FmtChunkHeader fmt{};
-            if (!file.read(reinterpret_cast<char*>(&fmt), sizeof(fmt))) {
+            if (!ReadAt(file, payloadStart, &fmt, sizeof(fmt))) {
                 return "Invalid WAV file: cannot read fmt chunk";
             }
 
@@ -169,14 +188,10 @@ std::string ParseWavChunks(const std::wstring& path, bool requireData,
         if ((chunk.size & 1u) != 0) {
             ++next;
         }
-        if (next > static_cast<uint64_t>(fileEnd)) {
+        if (next > fileEnd) {
             return "Invalid WAV file: chunk extends beyond end of file";
         }
-        file.clear();
-        file.seekg(static_cast<std::streamoff>(next), std::ios::beg);
-        if (!file) {
-            return "Invalid WAV file: cannot skip chunk";
-        }
+        cursor = next;
     }
 
     if (!out.hasFormat) {
@@ -188,11 +203,17 @@ std::string ParseWavChunks(const std::wstring& path, bool requireData,
     return {};
 }
 
+HANDLE OpenWavPath(const std::wstring& path) {
+    return CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+}
+
 } // namespace
 
-std::string ParseWavFormat(const std::wstring& path, WavFormat& out) {
+std::string ParseWavFormat(void* handle, WavFormat& out) {
     ParsedWav parsed;
-    std::string error = ParseWavChunks(path, false, parsed);
+    std::string error =
+        ParseWavChunks(static_cast<HANDLE>(handle), false, parsed);
     if (!error.empty()) {
         return error;
     }
@@ -200,14 +221,25 @@ std::string ParseWavFormat(const std::wstring& path, WavFormat& out) {
     return {};
 }
 
+std::string ParseWavFormat(const std::wstring& path, WavFormat& out) {
+    HANDLE file = OpenWavPath(path);
+    if (file == INVALID_HANDLE_VALUE) {
+        return "Could not open WAV file: " + core::WideToUtf8(path);
+    }
+
+    const std::string error = ParseWavFormat(static_cast<void*>(file), out);
+    CloseHandle(file);
+    return error;
+}
+
 uint8_t PcmSilenceByte(uint16_t bitsPerSample) {
     return bitsPerSample == 8 ? 0x80 : 0x00;
 }
 
-WavValidation ParseWavFile(const std::wstring& path, WavFileInfo& out,
+WavValidation ParseWavFile(void* handle, WavFileInfo& out,
                            std::string& error) {
     ParsedWav parsed;
-    error = ParseWavChunks(path, true, parsed);
+    error = ParseWavChunks(static_cast<HANDLE>(handle), true, parsed);
     if (!error.empty()) {
         return WavValidation::Malformed;
     }
@@ -241,6 +273,20 @@ WavValidation ParseWavFile(const std::wstring& path, WavFileInfo& out,
     }
 
     return WavValidation::Ok;
+}
+
+WavValidation ParseWavFile(const std::wstring& path, WavFileInfo& out,
+                           std::string& error) {
+    HANDLE file = OpenWavPath(path);
+    if (file == INVALID_HANDLE_VALUE) {
+        error = "Could not open WAV file: " + core::WideToUtf8(path);
+        return WavValidation::Malformed;
+    }
+
+    const WavValidation result =
+        ParseWavFile(static_cast<void*>(file), out, error);
+    CloseHandle(file);
+    return result;
 }
 
 } // namespace kessoku::audio

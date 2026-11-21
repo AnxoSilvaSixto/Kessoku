@@ -1,3 +1,4 @@
+#include "kessoku/core/file_handle.h"
 #include "kessoku/core/library_root.h"
 
 #include <windows.h>
@@ -142,6 +143,8 @@ int main() {
     std::wstring nestedDir = root + L"\\nested";
     CreateSubdir(root, L"nested");
 
+    std::wstring tempDir = root.substr(0, root.find_last_of(L'\\'));
+
     std::wstring rootFile = root + L"\\test.flac";
     std::wstring nestedFile = nestedDir + L"\\deep.flac";
     CreateFileInDir(root, L"test.flac");
@@ -162,12 +165,61 @@ int main() {
     // (b) A file in a nested subdirectory inside the root -> true
     CHECK(libRoot.Contains(nestedFile), "file in nested subdir");
 
+    // (b2) OpenContained binds the containment decision to the open handle.
+    // A file inside the root is accepted, and the same handle reports the
+    // resolved final path and size used for later reads.
+    {
+        auto inside = kessoku::core::FileHandle::OpenContained(libRoot,
+                                                               rootFile);
+        CHECK(inside.IsOk(), "OpenContained accepts a file inside root");
+        if (inside.IsOk()) {
+            CHECK(inside.Value().IsValid(), "accepted handle is valid");
+            std::wstring finalPath;
+            CHECK(inside.Value().FinalPath(finalPath),
+                  "final path resolves from the open handle");
+            CHECK(libRoot.ContainsResolvedPath(finalPath),
+                  "resolved final path passes the root boundary");
+            uint64_t size = 0;
+            CHECK(inside.Value().Size(size) && size == 0,
+                  "empty fixture file reports size 0");
+
+            kessoku::core::FileHandle moved = std::move(inside.Value());
+            CHECK(moved.IsValid() && !inside.Value().IsValid(),
+                  "FileHandle move transfers ownership exactly once");
+        }
+
+        auto missing = kessoku::core::FileHandle::OpenContained(
+            libRoot, root + L"\\missing.flac");
+        CHECK(missing.IsErr(), "OpenContained fails closed on missing files");
+    }
+
+    // (b3) A resolved path is checked without reopening: the \\?\ form from
+    // GetFinalPathNameByHandleW is normalized, and a sibling whose name has
+    // the root as a string prefix is still outside the boundary.
+    {
+        const std::wstring canonicalRoot =
+            std::filesystem::weakly_canonical(root).wstring();
+        const std::wstring canonicalRootFile =
+            std::filesystem::weakly_canonical(rootFile).wstring();
+        CHECK(libRoot.ContainsResolvedPath(canonicalRootFile),
+              "resolved path inside root is accepted directly");
+        CHECK(libRoot.ContainsResolvedPath(L"\\\\?\\" + canonicalRootFile),
+              "extended-length resolved path is normalized and accepted");
+        CHECK(libRoot.ContainsResolvedPath(canonicalRoot),
+              "resolved path equal to the root is accepted");
+        CHECK(!libRoot.ContainsResolvedPath(canonicalRoot + L"Other\\file.flac"),
+              "resolved sibling with the root as a string prefix is rejected");
+        CHECK(!libRoot.ContainsResolvedPath(canonicalRoot + L"x\\file.flac"),
+              "resolved path sharing the root name prefix is rejected");
+        CHECK(!libRoot.ContainsResolvedPath(L""),
+              "empty resolved path is rejected");
+    }
+
     // (c) A ..-traversal path resolving outside the root -> false
     std::wstring outsideTraversal = root + L"\\..\\other_dir\\file.txt";
     CHECK(!libRoot.Contains(outsideTraversal), "..-traversal outside root");
 
     // (d) An absolute path on the same drive, outside the root -> false
-    std::wstring tempDir = root.substr(0, root.find_last_of(L'\\'));
     std::wstring siblingDir = tempDir + L"\\kessoku_sibling_dir";
     if (CreateDirectoryW(siblingDir.c_str(), nullptr) ||
         GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -175,6 +227,17 @@ int main() {
         CreateFileInDir(siblingDir, L"file.flac");
         CHECK(!libRoot.Contains(siblingFile),
               "absolute path on same drive, outside root");
+
+        // The same containment rule applies to a handle opened for reading:
+        // a valid file on the same drive but outside the root is rejected
+        // with InvalidPath, not parsed.
+        auto outsideHandle =
+            kessoku::core::FileHandle::OpenContained(libRoot, siblingFile);
+        Check(outsideHandle.IsErr() &&
+                  outsideHandle.GetError().code ==
+                      kessoku::core::ErrorCode::InvalidPath,
+              "OpenContained rejects a file outside root", __func__,
+              __LINE__);
         RemoveDirectoryW(siblingDir.c_str());
     } else {
         printf("SKIP: same-drive sibling test (could not create directory)\n");
@@ -232,6 +295,17 @@ int main() {
             std::wstring viaJunction = junctionPath + L"\\outside.flac";
             CHECK(!libRoot.Contains(viaJunction),
                   "file reached through junction pointing outside");
+
+            // A handle must reach the same conclusion without a second path
+            // resolution: OpenContained resolves this file's final path from
+            // the open handle and rejects it.
+            auto junctionHandle =
+                kessoku::core::FileHandle::OpenContained(libRoot, viaJunction);
+            Check(junctionHandle.IsErr() &&
+                      junctionHandle.GetError().code ==
+                          kessoku::core::ErrorCode::InvalidPath,
+                  "OpenContained rejects a file reached through an outside "
+                  "junction", __func__, __LINE__);
             RemoveDirectoryW(junctionPath.c_str());
         } else {
             DWORD gle = GetLastError();
@@ -253,6 +327,13 @@ int main() {
     if (symlinkOk) {
         CHECK(!libRoot.Contains(symlinkPath),
               "file symlink pointing outside root");
+        auto symlinkHandle =
+            kessoku::core::FileHandle::OpenContained(libRoot, symlinkPath);
+        Check(symlinkHandle.IsErr() &&
+                  symlinkHandle.GetError().code ==
+                      kessoku::core::ErrorCode::InvalidPath,
+              "OpenContained rejects a file symlink pointing outside root",
+              __func__, __LINE__);
         DeleteFileW(symlinkPath.c_str());
     } else {
         printf("SKIP: could not create symlink (requires Dev Mode or elevation)\n");

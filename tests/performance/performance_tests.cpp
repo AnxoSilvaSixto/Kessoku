@@ -274,12 +274,6 @@ void Report(const char* name, int iterations, Fn&& action) {
     }
 }
 
-template <typename Fn>
-void ReportProbe(const char* name, int iterations, Fn&& action) {
-    const double ms = MeasureWorstMs(iterations, action);
-    printf("PROBE: %-48s %8.2f ms (reported, not budgeted)\n", name, ms);
-}
-
 std::wstring MakeBenchmarkLibrary(const std::wstring& root,
                                   int directoryCount, int filesPerDirectory) {
     for (int d = 0; d < directoryCount; ++d) {
@@ -507,10 +501,9 @@ void RunLaunchBenchmark() {
 }
 
 // The declared library scale is 1,000-10,000 tracks (CLAUDE section 16.1).
-// At 1,000 tagged files this startup path exceeds the 400 ms Doherty budget
-// on the development machine, so this probe reports the real number instead
-// of hiding it behind a smaller fixture or a relaxed gate.
-void RunLaunchScaleProbe() {
+// The lower bound gets the same Doherty budget as the 500-track fixture, so
+// the declared scale is enforced rather than extrapolated from a smaller run.
+void RunLaunchScaleBenchmark() {
     constexpr int kArtists = 5;
     constexpr int kAlbumsPerArtist = 4;
     constexpr int kTracksPerAlbum = 50;
@@ -518,7 +511,7 @@ void RunLaunchScaleProbe() {
         kArtists * kAlbumsPerArtist * kTracksPerAlbum;
 
     TempDir dir(CreateUniqueTempDir(L"kessoku_perf_launch_scale_"));
-    Check(dir.valid(), "create launch scale probe temp directory");
+    Check(dir.valid(), "create 1,000-track launch temp directory");
     if (!dir.valid()) {
         return;
     }
@@ -526,13 +519,13 @@ void RunLaunchScaleProbe() {
     const bool libraryOk =
         MakeTaggedLaunchLibrary(dir.path(), kArtists, kAlbumsPerArtist,
                                 kTracksPerAlbum);
-    Check(libraryOk, "build 1,000-track tagged probe library");
+    Check(libraryOk, "build 1,000-track tagged launch library");
     if (!libraryOk) {
         return;
     }
 
     auto rootResult = kessoku::core::LibraryRoot::Create(dir.path());
-    Check(rootResult.IsOk(), "create LibraryRoot for launch scale probe");
+    Check(rootResult.IsOk(), "create LibraryRoot for 1,000-track launch");
     if (!rootResult.IsOk()) {
         return;
     }
@@ -540,13 +533,13 @@ void RunLaunchScaleProbe() {
 
     const auto initial = kessoku::library::Scan(root);
     Check(initial.files.size() == static_cast<size_t>(kExpectedTracks),
-          "launch scale probe finds every track");
+          "1,000-track launch finds every track");
     if (initial.files.size() != static_cast<size_t>(kExpectedTracks)) {
         return;
     }
 
     size_t indexed = 0;
-    ReportProbe("startup at 1,000 tagged tracks", 3, [&] {
+    Report("launch scan + metadata for 1,000 tagged tracks", 3, [&] {
         const auto scan = kessoku::library::Scan(root);
         size_t readable = 0;
         for (const auto& file : scan.files) {
@@ -557,7 +550,7 @@ void RunLaunchScaleProbe() {
         indexed = readable;
     });
     Check(indexed == static_cast<size_t>(kExpectedTracks),
-          "scale probe indexes every track");
+          "timed 1,000-track launch indexes every track");
 }
 
 void RunContainmentBenchmark() {
@@ -793,7 +786,7 @@ int main() {
     printf("\n");
     RunLaunchBenchmark();
     printf("\n");
-    RunLaunchScaleProbe();
+    RunLaunchScaleBenchmark();
     printf("\n");
     RunContainmentBenchmark();
     printf("\n");

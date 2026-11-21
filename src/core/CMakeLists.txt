@@ -1,4 +1,5 @@
 add_library(kessoku_core STATIC
+    src/file_handle.cpp
     src/library_root.cpp
     src/utf8.cpp
 )

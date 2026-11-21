@@ -20,9 +20,10 @@ struct TrackMetadata {
 // The application should prefer the LibraryRoot overload below.
 core::Result<TrackMetadata> ReadTrackMetadata(const std::filesystem::path& filePath);
 
-// Read tags after re-checking that the file still resolves inside `root`
-// immediately before each open. This narrows the scan-time check-then-open
-// window; it does not replace binding the canonical handle to the parser.
+// Read tags after verifying that the file resolves inside `root`. The file
+// is opened once; the containment decision and every TagLib read are bound to
+// that same handle, so a path swapped for a junction or symlink after the
+// check cannot redirect metadata parsing.
 core::Result<TrackMetadata> ReadTrackMetadata(
     const core::LibraryRoot& root,
     const std::filesystem::path& filePath);

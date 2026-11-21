@@ -11,6 +11,12 @@ public:
 
     bool Contains(std::wstring_view candidate) const;
 
+    // Check a path that has already been resolved from an open handle (for
+    // example by GetFinalPathNameByHandleW). No filesystem operation runs
+    // here, so callers can bind the containment decision to the same handle
+    // they later read.
+    bool ContainsResolvedPath(std::wstring_view resolvedPath) const;
+
     const std::wstring& path() const { return canonicalPath_; }
 
 private:

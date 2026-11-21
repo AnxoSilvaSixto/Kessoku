@@ -3,23 +3,127 @@
 #include "kessoku/audio/flac_format.h"
 #include "kessoku/audio/wav_format.h"
 #include "kessoku/core/error.h"
+#include "kessoku/core/file_handle.h"
 #include "kessoku/core/library_root.h"
 #include "kessoku/core/utf8.h"
 
-#include <taglib/fileref.h>
 #include <taglib/flacfile.h>
-#include <taglib/wavfile.h>
 #include <taglib/id3v2tag.h>
+#include <taglib/tiostream.h>
 #include <taglib/tpropertymap.h>
 #include <taglib/tstring.h>
+#include <taglib/wavfile.h>
 
+#define NOMINMAX
+#include <windows.h>
+
+#include <algorithm>
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
 #include <cwchar>
 #include <cwctype>
-#include <fstream>
+#include <string>
+#include <vector>
 
 namespace {
+
+// TagLib stream backed by the already-opened, already-validated file handle.
+// TagLib never takes ownership of an IOStream; the caller keeps this object
+// alive for the whole file-object lifetime. All reads use the same handle the
+// containment decision was made on, so a path swap after the check cannot
+// redirect metadata parsing to another file.
+class HandleStream final : public TagLib::IOStream {
+public:
+    HandleStream(void* handle, std::wstring name)
+        : handle_(static_cast<HANDLE>(handle)), name_(std::move(name)) {
+        seek(0, Beginning);
+    }
+
+    TagLib::FileName name() const override {
+        return TagLib::FileName(name_.c_str());
+    }
+
+    TagLib::ByteVector readBlock(size_t length) override {
+        if (handle_ == nullptr || length == 0) {
+            return {};
+        }
+
+        std::vector<char> buffer(length);
+        size_t total = 0;
+        while (total < length) {
+            const DWORD request = static_cast<DWORD>(
+                std::min<size_t>(length - total, MAXDWORD));
+            DWORD read = 0;
+            if (!ReadFile(handle_, buffer.data() + total, request, &read,
+                          nullptr) ||
+                read == 0) {
+                break;
+            }
+            total += read;
+        }
+        return TagLib::ByteVector(buffer.data(),
+                                  static_cast<unsigned int>(total));
+    }
+
+    void writeBlock(const TagLib::ByteVector& /*data*/) override {}
+    void insert(const TagLib::ByteVector& /*data*/, TagLib::offset_t /*start*/,
+                size_t /*replace*/) override {}
+    void removeBlock(TagLib::offset_t /*start*/, size_t /*length*/) override {}
+
+    // Metadata reads never write; TagLib uses this only to decide whether a
+    // save is possible, which this application never attempts.
+    bool readOnly() const override { return true; }
+
+    bool isOpen() const override { return handle_ != nullptr; }
+
+    void seek(TagLib::offset_t offset, Position p) override {
+        if (handle_ == nullptr) {
+            return;
+        }
+
+        LARGE_INTEGER distance{};
+        distance.QuadPart = offset;
+        DWORD method = FILE_BEGIN;
+        if (p == Current) {
+            method = FILE_CURRENT;
+        } else if (p == End) {
+            method = FILE_END;
+        }
+        SetFilePointerEx(handle_, distance, nullptr, method);
+    }
+
+    TagLib::offset_t tell() const override {
+        if (handle_ == nullptr) {
+            return -1;
+        }
+
+        LARGE_INTEGER zero{};
+        LARGE_INTEGER position{};
+        if (!SetFilePointerEx(handle_, zero, &position, FILE_CURRENT)) {
+            return -1;
+        }
+        return static_cast<TagLib::offset_t>(position.QuadPart);
+    }
+
+    TagLib::offset_t length() override {
+        if (handle_ == nullptr) {
+            return 0;
+        }
+
+        LARGE_INTEGER size{};
+        if (!GetFileSizeEx(handle_, &size) || size.QuadPart < 0) {
+            return 0;
+        }
+        return static_cast<TagLib::offset_t>(size.QuadPart);
+    }
+
+    void truncate(TagLib::offset_t /*length*/) override {}
+
+private:
+    HANDLE handle_ = nullptr;
+    std::wstring name_;
+};
 
 std::wstring TagLibStringToWString(const TagLib::String& s) {
     return s.toWString();
@@ -74,69 +178,13 @@ bool IsWavFile(const std::filesystem::path& filePath) {
     return ext == L".wav";
 }
 
-// libFLAC accepts the fLaC stream marker either at offset 0 or immediately
-// after an ID3v2 tag, and rejects anything else. TagLib's FLAC detection is
-// looser (it scans for the marker), so a .flac that TagLib can open may still
-// fail at play time. Mirror libFLAC's opening rule here so the library list
-// only contains files the player can actually decode.
-bool HasFlacStreamMarker(const std::filesystem::path& filePath) {
-    std::ifstream file(filePath, std::ios::binary);
-    if (!file.is_open()) {
-        return false;
-    }
-
-    char magic[4]{};
-    file.read(magic, sizeof(magic));
-    if (file.gcount() != static_cast<std::streamsize>(sizeof(magic))) {
-        return false;
-    }
-    if (std::memcmp(magic, "fLaC", 4) == 0) {
-        return true;
-    }
-    if (std::memcmp(magic, "ID3", 3) != 0) {
-        return false;
-    }
-
-    // ID3v2 header: "ID3", major/minor version, flags, synchsafe size.
-    char header[10]{};
-    file.clear();
-    file.seekg(0, std::ios::beg);
-    file.read(header, sizeof(header));
-    if (file.gcount() != static_cast<std::streamsize>(sizeof(header))) {
-        return false;
-    }
-    for (int i = 6; i < 10; ++i) {
-        if ((static_cast<unsigned char>(header[i]) & 0x80u) != 0) {
-            return false; // not a valid synchsafe tag length
-        }
-    }
-    const uint32_t tagSize =
-        (static_cast<uint32_t>(static_cast<unsigned char>(header[6])) << 21) |
-        (static_cast<uint32_t>(static_cast<unsigned char>(header[7])) << 14) |
-        (static_cast<uint32_t>(static_cast<unsigned char>(header[8])) << 7) |
-        static_cast<uint32_t>(static_cast<unsigned char>(header[9]));
-    // ID3v2.4 allows a 10-byte footer when flag 0x10 is set.
-    const uint64_t skip =
-        10ull + tagSize +
-        ((static_cast<unsigned char>(header[5]) & 0x10u) != 0 ? 10ull : 0ull);
-    file.clear();
-    file.seekg(static_cast<std::streamoff>(skip), std::ios::beg);
-    file.read(magic, sizeof(magic));
-    return file.gcount() == static_cast<std::streamsize>(sizeof(magic)) &&
-           std::memcmp(magic, "fLaC", 4) == 0;
-}
-
-// Mirror the player's FLAC acceptance gates, not just the stream marker:
-// libFLAC can open a FLAC whose STREAMINFO declares a bit depth this player
-// has no exact PCM container for. Listing it would guarantee a failure at the
-// first click, so the library applies the same range and container checks as
-// Player::Create.
-bool IsPlayableFlac(const std::filesystem::path& filePath) {
-    if (!HasFlacStreamMarker(filePath)) {
-        return false;
-    }
+// Mirror the player's FLAC acceptance gates. ParseFlacFormat already rejects
+// a missing marker (unless it follows an ID3v2 tag), a bad STREAMINFO, and
+// zero or out-of-range fields; these are the same container checks
+// Player::Create applies so a listed track cannot fail at the first click.
+bool IsPlayableFlac(void* handle) {
     kessoku::audio::FlacFormat format{};
-    if (!kessoku::audio::ParseFlacFormat(filePath.wstring(), format).empty()) {
+    if (!kessoku::audio::ParseFlacFormat(handle, format).empty()) {
         return false;
     }
     if (format.bitsPerSample != 8 && format.bitsPerSample != 16 &&
@@ -156,12 +204,16 @@ bool IsPlayableFlac(const std::filesystem::path& filePath) {
 // listed when it has the RIFF/WAVE signature, PCM fmt fields, consistent
 // block alignment, a data chunk whose declared range fits inside the file,
 // and a bit depth/channel count with an exact exclusive-mode container.
-// Anything less would list a track that fails at the first click.
-bool IsPlayableWav(const std::filesystem::path& filePath) {
+bool IsPlayableWav(void* handle) {
     kessoku::audio::WavFileInfo info{};
     std::string error;
-    return kessoku::audio::ParseWavFile(filePath.wstring(), info, error) ==
+    return kessoku::audio::ParseWavFile(handle, info, error) ==
            kessoku::audio::WavValidation::Ok;
+}
+
+std::string UnreadableMessage(const std::filesystem::path& filePath) {
+    return "Could not open or parse file: " +
+           kessoku::core::WideToUtf8(filePath.wstring());
 }
 
 } // namespace
@@ -173,78 +225,57 @@ namespace {
 core::Result<TrackMetadata> ReadTrackMetadataImpl(
     const std::filesystem::path& filePath,
     const core::LibraryRoot* root) {
-    // Check-then-open cannot be fully closed without binding the canonical
-    // handle to the parser. Re-resolving here narrows the window at the
-    // point that matters: the caller can no longer rely on a containment
-    // result from an earlier scan.
-    const auto stillContained = [&filePath, root] {
-        return root == nullptr || root->Contains(filePath.wstring());
-    };
-
-    if (!stillContained()) {
+    // One open, one containment decision, and every later read from that
+    // same handle. When a root is supplied, OpenContained resolves the final
+    // path from the handle it just opened; a junction or symlink swapped in
+    // afterwards cannot redirect the parse.
+    core::Result<core::FileHandle> opened =
+        root != nullptr
+            ? core::FileHandle::OpenContained(*root, filePath.wstring())
+            : core::FileHandle::Open(filePath.wstring());
+    if (opened.IsErr()) {
+        const core::Error& error = opened.GetError();
+        if (error.code == core::ErrorCode::InvalidPath) {
+            return core::Result<TrackMetadata>::Err(error.code,
+                                                    error.message);
+        }
         return core::Result<TrackMetadata>::Err(
-            core::ErrorCode::InvalidPath,
-            "Metadata path resolves outside the library root");
+            core::ErrorCode::UnknownError, UnreadableMessage(filePath));
     }
+    core::FileHandle source = std::move(opened.Value());
 
     // Validate the container before TagLib parses it. A .wav path with a
     // bogus header must not make the library parse arbitrary chunks, a
     // signature-only file must not report success with empty metadata, and a
     // .flac whose STREAMINFO is unreadable or not playable must not list a
     // track Player::Create would refuse.
-    if (IsWavFile(filePath) && !IsPlayableWav(filePath)) {
+    if (IsWavFile(filePath) && !IsPlayableWav(source.get())) {
         return core::Result<TrackMetadata>::Err(
-            core::ErrorCode::UnknownError,
-            "Could not open or parse file: " +
-                core::WideToUtf8(filePath.wstring())
-        );
+            core::ErrorCode::UnknownError, UnreadableMessage(filePath));
     }
-    if (IsFlacFile(filePath) && !IsPlayableFlac(filePath)) {
+    if (IsFlacFile(filePath) && !IsPlayableFlac(source.get())) {
         return core::Result<TrackMetadata>::Err(
-            core::ErrorCode::UnknownError,
-            "Could not open or parse file: " +
-                core::WideToUtf8(filePath.wstring())
-        );
+            core::ErrorCode::UnknownError, UnreadableMessage(filePath));
     }
 
-    // Re-check immediately before TagLib opens the path. The validator above
-    // also opened it, so a swap between the two opens is refused here.
-    if (!stillContained()) {
-        return core::Result<TrackMetadata>::Err(
-            core::ErrorCode::InvalidPath,
-            "Metadata path resolves outside the library root");
-    }
-
-    TagLib::FileRef ref(
-        filePath.wstring().c_str(),
-        false // don't read audio properties — we only need tags
-    );
-
-    if (ref.isNull()) {
-        return core::Result<TrackMetadata>::Err(
-            core::ErrorCode::UnknownError,
-            "Could not open or parse file: " +
-                core::WideToUtf8(filePath.wstring())
-        );
-    }
+    // TagLib reads through this stream, which seeks back to zero in its
+    // constructor. The file objects below do not own the stream, so it must
+    // outlive them: declaration order puts the stream first.
+    HandleStream stream(source.get(), filePath.wstring());
 
     TrackMetadata meta{};
 
     if (IsFlacFile(filePath)) {
-        // FileRef selects a parser by content, not by extension. Require the
-        // opened file to actually be FLAC so a WAV renamed to .flac cannot be
-        // reported as a successful FLAC metadata read.
-        TagLib::FLAC::File* flacFile =
-            dynamic_cast<TagLib::FLAC::File*>(ref.file());
-        if (!flacFile || !flacFile->isValid()) {
+        TagLib::FLAC::File flacFile(
+            &stream,
+            false // don't read audio properties - we only need tags
+        );
+        if (!flacFile.isValid()) {
             return core::Result<TrackMetadata>::Err(
-                core::ErrorCode::UnknownError,
-                "Could not open or parse file: " +
-                    core::WideToUtf8(filePath.wstring())
-            );
+                core::ErrorCode::UnknownError, UnreadableMessage(filePath));
         }
 
-        TagLib::Tag* tag = flacFile->tag();
+        TagLib::Tag* tag = flacFile.tag();
         if (tag) {
             if (!tag->title().isEmpty()) {
                 meta.title = TagLibStringToWString(tag->title());
@@ -266,21 +297,19 @@ core::Result<TrackMetadata> ReadTrackMetadataImpl(
             }
         }
     } else {
-        // WAV — use FileRef's internal WAV file directly. The container and
-        // playable-format checks already ran in IsPlayableWav(), so this is
-        // only the parser type guard.
-        TagLib::RIFF::WAV::File* wavFile =
-            dynamic_cast<TagLib::RIFF::WAV::File*>(ref.file());
-        if (!wavFile || !wavFile->isValid()) {
+        // WAV - the container and playable-format checks already ran above,
+        // so this is only the parser type guard.
+        TagLib::RIFF::WAV::File wavFile(
+            &stream,
+            false // don't read audio properties - we only need tags
+        );
+        if (!wavFile.isValid()) {
             return core::Result<TrackMetadata>::Err(
-                core::ErrorCode::UnknownError,
-                "Could not open or parse file: " +
-                    core::WideToUtf8(filePath.wstring())
-            );
+                core::ErrorCode::UnknownError, UnreadableMessage(filePath));
         }
 
-        if (wavFile->hasID3v2Tag()) {
-            TagLib::ID3v2::Tag* id3v2 = wavFile->ID3v2Tag();
+        if (wavFile.hasID3v2Tag()) {
+            TagLib::ID3v2::Tag* id3v2 = wavFile.ID3v2Tag();
             if (id3v2) {
                 TagLib::PropertyMap props = id3v2->properties();
 
@@ -318,8 +347,8 @@ core::Result<TrackMetadata> ReadTrackMetadata(
     const std::filesystem::path& filePath) {
     // Path-only overload for callers that already established containment
     // (tests and benchmarks reading a known temp file). The application uses
-    // the LibraryRoot overload below so containment is re-checked at open
-    // time; try to do the same for new callers.
+    // the LibraryRoot overload below so containment is checked on the same
+    // handle that is parsed; try to do the same for new callers.
     return ReadTrackMetadataImpl(filePath, nullptr);
 }
 

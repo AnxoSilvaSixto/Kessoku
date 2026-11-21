@@ -18,6 +18,17 @@ This is a hard security boundary, not a UX nicety — see `CLAUDE.md` §1/§8. T
 
 On Windows, comparing path strings with a prefix check is not sufficient containment. Resolve both the candidate path and the root to their canonical, final form (verify the current recommended API and its exact semantics against Microsoft Learn before relying on it — don't take this from memory) and compare *those*, so a junction, symlink, or reparse point that looks like it's inside the root but actually points outside it gets caught.
 
+## Bind containment to the open handle
+
+A containment check followed by a fresh open is still a check-then-open race: the path can be replaced with a junction or symlink between the two calls. The project closes that window with `core::FileHandle` (`src/core/include/kessoku/core/file_handle.h`):
+
+1. Open the file once with `CreateFileW` and keep the handle.
+2. Resolve the final path from that exact handle with `GetFinalPathNameByHandleW`.
+3. Compare the resolved path against the canonical root (`LibraryRoot::ContainsResolvedPath`).
+4. Parse metadata and play from the same handle; duplicate it when a decoder needs its own handle.
+
+Use `FileHandle::OpenContained(root, path)` for any operation whose path came from outside the already-open set. Do not replace it with `Contains()` plus a later path-based open.
+
 ## Attack-surface checklist — think through each for any path-handling change
 
 - `..` traversal
@@ -28,11 +39,12 @@ On Windows, comparing path strings with a prefix check is not sufficient contain
 - Symbolic links
 - Windows reparse points generally
 - Case and Unicode-normalization differences
-- TOCTOU-style races (the check and the actual file operation aren't atomic)
+- TOCTOU-style races (the check and the actual file operation aren't atomic; bind them to one handle)
 
 ## Testing priorities for anything in this area
 
-- Library-root containment itself — a path outside the root must be rejected, not silently clamped or ignored
+- Library-root containment itself — a path outside the root must be rejected, not silently clamped or ignored, including when it is reached through `..`, a junction, or a symlink
+- Handle-bound containment — `OpenContained` must reject the same escapes, and the accepted handle must be the one later read
 - File discovery correctly stays within the root
 - Unsupported-format files are rejected, not partially processed
 - At least one test per attack-surface item above that's relevant to the code being changed
